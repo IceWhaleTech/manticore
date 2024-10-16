@@ -1,0 +1,8 @@
+{
+    "name": "manticore",
+    "services": [
+        {
+            "name": "manticore"
+        }
+    ]     
+}

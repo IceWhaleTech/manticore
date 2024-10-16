@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+executor=$(which manticore-executor 2> /dev/null)
+if [[ -z "$executor" ]]; then
+  echo >&2 Manticore Buddy  requires manticore-executor. Please install package 'manticore-extra'.
+  exit 1
+fi
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+# Try to find where is the modules are stored
+if [ -d /usr/share/manticore/modules/manticore-buddy ]; then
+  src_dir=/usr/share/manticore/modules/manticore-buddy;
+elif [ -d /usr/local/share/manticore/modules/manticore-buddy ]; then
+  src_dir=/usr/local/share/manticore/modules/manticore-buddy;
+elif [ -d /opt/homebrew/share/manticore/modules/manticore-buddy ]; then
+  src_dir=/opt/homebrew/share/manticore/modules/manticore-buddy;
+elif [ -d "$SCRIPT_DIR/share/modules/manticore-buddy" ]; then
+  src_dir="$SCRIPT_DIR/share/modules/manticore-buddy"
+elif [ -d "$SCRIPT_DIR/../src/main.php" ]; then
+  src_dir="$SCRIPT_DIR/.."
+elif [ -d "$SCRIPT_DIR/../share/manticore/modules/manticore-buddy" ]; then
+  src_dir="$SCRIPT_DIR/../share/manticore/modules/manticore-buddy";
+else
+  echo >&2 Failed to find manticore-buddy path in predefined share modules.
+  exit 1
+fi
+exec $executor -n "$src_dir/src/main.php" "$@"

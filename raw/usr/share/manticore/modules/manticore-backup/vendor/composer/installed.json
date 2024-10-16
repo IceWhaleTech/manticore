@@ -1,0 +1,121 @@
+{
+    "packages": [
+        {
+            "name": "manticoresoftware/openmetrics",
+            "version": "v0.1.0",
+            "version_normalized": "0.1.0.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/manticoresoftware/exposition-text.git",
+                "reference": "4054ad5b63da8874974801df5977189bafa0374b"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/manticoresoftware/exposition-text/zipball/4054ad5b63da8874974801df5977189bafa0374b",
+                "reference": "4054ad5b63da8874974801df5977189bafa0374b",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=8.1"
+            },
+            "require-dev": {
+                "ext-xdebug": "*",
+                "hollodotme/phpunit-testdox-markdown": "~1.0.0",
+                "tm/tooly-composer-script": "~1.4"
+            },
+            "time": "2022-10-27T05:48:35+00:00",
+            "type": "library",
+            "extra": {
+                "tools": {
+                    "phpunit8": {
+                        "url": "https://phar.phpunit.de/phpunit-8.phar",
+                        "only-dev": true,
+                        "replace": true
+                    }
+                }
+            },
+            "installation-source": "dist",
+            "autoload": {
+                "psr-4": {
+                    "OpenMetrics\\Exposition\\Text\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "Holger Woltersdorf",
+                    "email": "hw@hollo.me"
+                },
+                {
+                    "name": "Manticore Software",
+                    "email": "contact@manticoresearch.com"
+                }
+            ],
+            "description": "Implementation of the text exposition format of OpenMetrics",
+            "support": {
+                "source": "https://github.com/manticoresoftware/exposition-text/tree/v0.1.0"
+            },
+            "install-path": "../manticoresoftware/openmetrics"
+        },
+        {
+            "name": "manticoresoftware/telemetry",
+            "version": "0.1.21",
+            "version_normalized": "0.1.21.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/manticoresoftware/telemetry-lib.git",
+                "reference": "954890948c23612e75c40b7e29363f6d7ea28955"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/manticoresoftware/telemetry-lib/zipball/954890948c23612e75c40b7e29363f6d7ea28955",
+                "reference": "954890948c23612e75c40b7e29363f6d7ea28955",
+                "shasum": ""
+            },
+            "require": {
+                "manticoresoftware/openmetrics": "^v0.1.0",
+                "php": ">=8.1"
+            },
+            "require-dev": {
+                "phpstan/phpstan": "^1.8",
+                "phpunit/phpunit": "^9.5",
+                "slevomat/coding-standard": "^8.5",
+                "squizlabs/php_codesniffer": "^3.7"
+            },
+            "time": "2024-03-19T11:33:03+00:00",
+            "type": "library",
+            "installation-source": "dist",
+            "autoload": {
+                "psr-4": {
+                    "Manticoresoftware\\Telemetry\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "GPL-2.0-or-later"
+            ],
+            "authors": [
+                {
+                    "name": "Manticore Software Co. Ltd",
+                    "email": "contact@manticoresearch.com"
+                }
+            ],
+            "description": "Metric collection tool for PHP projects of Manticore Software",
+            "keywords": [
+                "analytics",
+                "metric",
+                "telemetry"
+            ],
+            "support": {
+                "issues": "https://github.com/manticoresoftware/telemetry-lib/issues",
+                "source": "https://github.com/manticoresoftware/telemetry-lib/tree/0.1.21"
+            },
+            "install-path": "../manticoresoftware/telemetry"
+        }
+    ],
+    "dev": false,
+    "dev-package-names": []
+}

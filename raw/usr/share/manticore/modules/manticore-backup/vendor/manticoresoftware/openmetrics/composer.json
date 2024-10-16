@@ -1,0 +1,49 @@
+{
+  "name": "manticoresoftware/openmetrics",
+  "description": "Implementation of the text exposition format of OpenMetrics",
+  "minimum-stability": "stable",
+  "type": "library",
+  "prefer-stable": true,
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Holger Woltersdorf",
+      "email": "hw@hollo.me"
+    },
+    {
+      "name": "Manticore Software",
+      "email": "contact@manticoresearch.com"
+    }
+  ],
+  "require": {
+    "php": ">=8.1"
+  },
+  "autoload": {
+    "psr-4": {
+      "OpenMetrics\\Exposition\\Text\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "OpenMetrics\\Exposition\\Text\\Tests\\": "tests/"
+    }
+  },
+  "require-dev": {
+    "ext-xdebug": "*",
+    "tm/tooly-composer-script": "~1.4",
+    "hollodotme/phpunit-testdox-markdown": "~1.0.0"
+  },
+  "scripts": {
+    "post-install-cmd": "Tooly\\ScriptHandler::installPharTools",
+    "post-update-cmd": "Tooly\\ScriptHandler::installPharTools"
+  },
+  "extra": {
+    "tools": {
+      "phpunit8": {
+        "url": "https://phar.phpunit.de/phpunit-8.phar",
+        "only-dev": true,
+        "replace": true
+      }
+    }
+  }
+}
