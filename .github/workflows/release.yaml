@@ -10,6 +10,8 @@ jobs:
         steps:
             -   uses: actions/checkout@v3
             -   run: rm -rf .github
+            -   run: rm manticore.raw || true
+            -   run: rm manticore_icu.raw || true
             -   run: mksquashfs raw/ manticore.raw
             -   run: mksquashfs raw_icu/ manticore_icu.raw
             -   name: '更新 Update release'
