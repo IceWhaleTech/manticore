@@ -1,8 +1,4 @@
 {
     "name": "manticore_icu",
-    "services": [
-        {
-            "name": "manticore_icu"
-        }
-    ]
+    "services": []
 }
