@@ -25,7 +25,7 @@ class QueueProcess extends BaseProcessor {
 	public function start(): array {
 		parent::start();
 
-		$this->execute('runPool');
+		$this->runPool();
 		return [];
 	}
 
@@ -43,18 +43,18 @@ class QueueProcess extends BaseProcessor {
 	public function runPool(): void {
 
 		if (!$this->client->hasTable(Payload::SOURCE_TABLE_NAME)) {
-			Buddy::debug('Queue source table not exist. Exit queue process pool');
+			Buddy::debug('Queue source table does not exist. Exiting queue process pool');
 			return;
 		}
 
 		if (!$this->client->hasTable(Payload::VIEWS_TABLE_NAME)) {
-			Buddy::debug('Queue views table not exist. Exit queue process pool');
+			Buddy::debug('Queue views table does not exist. Exiting queue process pool');
 			return;
 		}
 
 		$sql = /** @lang ManticoreSearch */
 			'SELECT * FROM ' . Payload::SOURCE_TABLE_NAME .
-			" WHERE match('@name \"" . BaseCreateSourceHandler::SOURCE_TYPE_KAFKA . "\"') LIMIT 99999";
+			" WHERE match('@type \"" . BaseCreateSourceHandler::SOURCE_TYPE_KAFKA . "\"') LIMIT 99999";
 		$results = $this->client->sendRequest($sql);
 
 		if ($results->hasError()) {
@@ -77,18 +77,20 @@ class QueueProcess extends BaseProcessor {
 			}
 
 			$results = $results->getResult();
-			if (is_array($results[0]) && !isset($results[0]['data'][0])) {
+			/** @var array{data:array<int,array<string,string>>} $resultStruct */
+			$resultStruct = $results[0];
+			if (is_array($resultStruct) && !isset($resultStruct['data'][0])) {
 				Buddy::debug("Can't find view with source_name {$instance['full_name']}");
 				continue;
 			}
 
-			if (!empty($results[0]['data'][0]['suspended'])) {
-				Buddy::debugv("Worker {$instance['full_name']} is suspended. Skip running");
+			if (!empty($resultStruct['data'][0]['suspended'])) {
+				Buddy::debugvv("Worker {$instance['full_name']} is suspended. Skip running");
 				continue;
 			}
 
-			$instance['destination_name'] = $results[0]['data'][0]['destination_name'];
-			$instance['query'] = $results[0]['data'][0]['query'];
+			$instance['destination_name'] = $resultStruct['data'][0]['destination_name'];
+			$instance['query'] = $resultStruct['data'][0]['query'];
 			$this->execute('runWorker',	[$instance]);
 		}
 	}
@@ -102,17 +104,21 @@ class QueueProcess extends BaseProcessor {
 	 *    buffer_table:string,
 	 *    destination_name:string,
 	 *    query:string,
+	 *    custom_mapping: string,
 	 *    attrs:string } $instance
 	 * @param bool $shouldStart
 	 * @throws \Exception
 	 */
 	public function runWorker(array $instance, bool $shouldStart = true): void {
-
-		Buddy::debugv('Start worker ' . $instance['full_name']);
-		$kafkaWorker = new KafkaWorker($this->client, $instance);
-		$worker = Process::createWorker($kafkaWorker, $instance['full_name']);
-		// Add worker to the pool and automatically start it
-		$this->process->addWorker($worker, $shouldStart);
+		Buddy::debugvv('Start worker ' . $instance['full_name']);
+		try {
+			$kafkaWorker = new KafkaWorker($this->client, $instance);
+			$worker = Process::createWorker($kafkaWorker, $instance['full_name']);
+			// Add worker to the pool and automatically start it
+			$this->process->addWorker($worker, $shouldStart);
+		} catch (\Exception $exception) {
+			Buddy::error($exception);
+		}
 
 		// When we need to use this method from the Handler
 		// we simply get processor and execute method with parameters
@@ -127,7 +133,8 @@ class QueueProcess extends BaseProcessor {
 		try {
 			$worker = $this->process->getWorker($id);
 			$this->process->removeWorker($worker);
-		} catch (Throwable) {
+		} catch (Throwable $exception) {
+			Buddy::debugvv($exception->getMessage());
 		} finally {
 			return true;
 		}

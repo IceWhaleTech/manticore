@@ -54,7 +54,7 @@ final class Payload extends BasePayload {
 		 *                   base_expr: string
 		 *               }>
 		 *           },
-		 *           TABLE: array{
+		 *           TABLE?: array{
 		 *               base_expr: string,
 		 *               name: string,
 		 *               no_quotes: array{
@@ -76,6 +76,15 @@ final class Payload extends BasePayload {
 		 *                           parts: array<string>
 		 *                       },
 		 *                       base_expr: string
+		 *                   },
+		 *                   source: array{
+		 *                       expr_type: string,
+		 *                       table: string,
+		 *                       no_quotes: array{
+		 *                           delim: bool,
+		 *                           parts: array<string>
+		 *                       },
+		 *                       base_expr: string
 		 *                   }
 		 *               }>
 		 *           }
@@ -83,8 +92,16 @@ final class Payload extends BasePayload {
 		 */
 		$payload = Payload::$sqlQueryParser::getParsedPayload();
 
-		$self->destinationTableName = $payload['RENAME']['sub_tree'][0]['destination']['no_quotes']['parts'][0];
-		$self->sourceTableName = $payload['TABLE']['no_quotes']['parts'][0];
+		if (isset($payload['TABLE'])) {
+			$self->destinationTableName = $payload['RENAME']['sub_tree'][0]['destination']['no_quotes']['parts'][0];
+			$self->sourceTableName = $payload['TABLE']['no_quotes']['parts'][0];
+		} else {
+			$self->destinationTableName =
+				(string)array_pop($payload['RENAME']['sub_tree'][1]['destination']['no_quotes']['parts']);
+			$self->sourceTableName =
+				(string)array_pop($payload['RENAME']['sub_tree'][1]['source']['no_quotes']['parts']);
+		}
+
 		return $self;
 	}
 
@@ -137,8 +154,9 @@ final class Payload extends BasePayload {
 		$payload = Payload::$sqlQueryParser::parse(
 			$request->payload,
 			fn(Request $request) => (
-				strpos($request->error, 'P03: syntax error, unexpected tablename') === 0
-				&& stripos($request->payload, 'alter') !== false
+				((strpos($request->error, 'P03: syntax error, unexpected tablename') === 0
+					&& stripos($request->payload, 'alter') !== false)
+					|| strpos($request->error, "P01: syntax error, unexpected identifier near 'RENAME TABLE") === 0)
 				&& stripos($request->payload, 'table') !== false
 				&& stripos($request->payload, 'rename') !== false
 			),
@@ -149,10 +167,11 @@ final class Payload extends BasePayload {
 			return false;
 		}
 
-		if (isset($payload['ALTER']['base_expr'])
+		if ((isset($payload['RENAME']['expr_type']) && $payload['RENAME']['expr_type'] === 'table')
+			|| (isset($payload['ALTER']['base_expr'])
 			&& isset($payload['TABLE']['no_quotes']['parts'][0])
 			&& isset($payload['RENAME']['sub_tree'][0]['destination']['no_quotes']['parts'][0])
-			&& strtolower($payload['ALTER']['base_expr']) === 'table'
+			&& strtolower($payload['ALTER']['base_expr']) === 'table')
 		) {
 			return true;
 		}

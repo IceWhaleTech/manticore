@@ -3,6 +3,7 @@
 namespace Manticoresearch\Buddy\Base\Plugin\Sharding;
 
 use Ds\Set;
+use Manticoresearch\Buddy\Core\Error\ManticoreSearchClientError;
 use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
 use RuntimeException;
 
@@ -10,10 +11,19 @@ final class Cluster {
 	// Name of the cluster that we use to store meta data
 	// TODO: not in use yet
 	const SYSTEM_NAME = 'system';
-	const GALERA_OPTIONS = 'gmcast.peer_timeout=PT5S';
+	const GALERA_OPTIONS = 'gmcast.peer_timeout=PT3S;' .
+		'evs.install_timeout=PT5S;' .
+		'evs.delayed_keep_period=PT10S;' .
+		'pc.wait_prim_timeout=PT5S';
 
 	/** @var Set<string> $nodes set of all nodes that belong the the cluster */
 	protected Set $nodes;
+
+	/** @var Set<string> $tablesToAttach set of all tables that we need to add to the cluster */
+	protected Set $tablesToAttach;
+
+	/** @var Set<string> $tablesToDetach set of all tables that we need to detach from the cluster */
+	protected Set $tablesToDetach;
 
 	/**
 	 * Initialize with a given client
@@ -27,6 +37,8 @@ final class Cluster {
 		protected string $nodeId
 	) {
 		$this->nodes = new Set;
+		$this->tablesToAttach = new Set;
+		$this->tablesToDetach = new Set;
 	}
 
 	/**
@@ -51,15 +63,9 @@ final class Cluster {
 	 * @return int Last insert id into the queue or 0
 	 */
 	public function create(?Queue $queue = null): int {
-		$nodes = $this->getNodes();
-		// Empty nodes mean that there is no such cluster
-		if (!$nodes->isEmpty()) {
-			throw new RuntimeException('Trying to create cluster that already exists');
-		}
-
 		// TODO: the pass is the subject to remove
 		$galeraOptions = static::GALERA_OPTIONS;
-		$query = "CREATE CLUSTER {$this->name} '{$this->name}' as path, '{$galeraOptions}' as options";
+		$query = "CREATE CLUSTER IF NOT EXISTS {$this->name} '{$this->name}' as path, '{$galeraOptions}' as options";
 		return $this->runQuery($queue, $query);
 	}
 
@@ -96,7 +102,7 @@ final class Cluster {
 		if ($queue) {
 			$queueId = $queue->add($this->nodeId, $query);
 		} else {
-			$this->client->sendRequest($query);
+			$this->client->sendRequest($query, disableAgentHeader: true);
 		}
 
 		return $queueId ?? 0;
@@ -185,10 +191,12 @@ final class Cluster {
 	 * @return static
 	 */
 	public function addNodeIds(Queue $queue, string ...$nodeIds): static {
+		$galeraOptions = static::GALERA_OPTIONS;
 		foreach ($nodeIds as $node) {
 			$this->nodes->add($node);
 			// TODO: the pass is the subject to remove
-			$query = "JOIN CLUSTER {$this->name} at '{$this->nodeId}' '{$this->name}' as path";
+			$query = "JOIN CLUSTER {$this->name} at '{$this->nodeId}' '{$this->name}' as " .
+				"path, '{$galeraOptions}' as options";
 			$queue->add($node, $query);
 		}
 		return $this;
@@ -217,39 +225,45 @@ final class Cluster {
 	 * Enqueue the tables attachments to all nodes of current cluster
 	 * @param Queue  $queue
 	 * @param string ...$tables
-	 * @return static
+	 * @return int
 	 */
-	public function addTables(Queue $queue, string ...$tables): static {
-		foreach ($tables as $table) {
-			$query = "ALTER CLUSTER {$this->name} ADD `{$table}`";
-			$queue->add($this->nodeId, $query);
+	public function addTables(Queue $queue, string ...$tables): int {
+		if (!$tables) {
+			throw new \Exception('Tables must be passed to add');
 		}
-		return $this;
+		$tables = implode(',', $tables);
+		$query = "ALTER CLUSTER {$this->name} ADD {$tables}";
+		return $queue->add($this->nodeId, $query);
 	}
 
 	/**
 	 * Enqueue the tables detachement to all nodes of current cluster
 	 * @param Queue  $queue
 	 * @param string ...$tables
-	 * @return static
+	 * @return int
 	 */
-	public function removeTables(Queue $queue, string ...$tables): static {
-		foreach ($tables as $table) {
-			$query = "ALTER CLUSTER {$this->name} DROP `{$table}`";
-			$queue->add($this->nodeId, $query);
+	public function removeTables(Queue $queue, string ...$tables): int {
+		if (!$tables) {
+			throw new \Exception('Tables must be passed to remove');
 		}
-		return $this;
+		$tables = implode(',', $tables);
+		$query = "ALTER CLUSTER {$this->name} DROP {$tables}";
+		return $queue->add($this->nodeId, $query);
 	}
 
 	/**
 	 * Attach table to cluster and make it available on all nodes
-	 * @param string $table
+	 * @param string ...$tables
 	 * @return static
 	 */
-	public function attachTable(string $table): static {
+	public function attachTables(string ...$tables): static {
+		if (!$tables) {
+			throw new \Exception('Tables must be passed to attach');
+		}
 		// We can have situation when no cluster required
 		if ($this->name) {
-			$query = "ALTER CLUSTER {$this->name} ADD {$table}";
+			$tables = implode(',', $tables);
+			$query = "ALTER CLUSTER {$this->name} ADD {$tables}";
 			$this->client->sendRequest($query);
 		}
 		return $this;
@@ -257,15 +271,69 @@ final class Cluster {
 
 	/**
 	 * Detach table from the current cluster
-	 * @param string $table
+	 * @param string ...$tables
 	 * @return static
 	 */
-	public function detachTable(string $table): static {
+	public function detachTables(string ...$tables): static {
+		if (!$tables) {
+			throw new \Exception('Tables must be passed to detach');
+		}
 		// We can have situation when no cluster required
 		if ($this->name) {
-			$query = "ALTER CLUSTER {$this->name} DROP {$table}";
+			$tables = implode(',', $tables);
+			$query = "ALTER CLUSTER {$this->name} DROP {$tables}";
 			$this->client->sendRequest($query);
 		}
+		return $this;
+	}
+
+	/**
+	 * Add pending table operation that we will process later in single shot
+	 * @param string $table
+	 * @param TableOperation $operation
+	 * @return static
+	 */
+	public function addPendingTable(string $table, TableOperation $operation): static {
+		if ($operation === TableOperation::Attach) {
+			$this->tablesToAttach->add($table);
+		} else {
+			$this->tablesToDetach->add($table);
+		}
+		return $this;
+	}
+
+	/**
+	 * Check if the table is pending to add or drop
+	 * @param string $table
+	 * @param TableOperation $operation
+	 * @return bool
+	 */
+	public function hasPendingTable(string $table, TableOperation $operation): bool {
+		if ($operation === TableOperation::Attach) {
+			return $this->tablesToAttach->contains($table);
+		}
+
+		return $this->tablesToDetach->contains($table);
+	}
+
+	/**
+	 * Process pending tables to add and drop in current cluster
+	 * @param Queue $queue
+	 * @return static
+	 * @throws RuntimeException
+	 * @throws ManticoreSearchClientError
+	 */
+	public function processPendingTables(Queue $queue): static {
+		if ($this->tablesToDetach->count()) {
+			$this->removeTables($queue, ...$this->tablesToDetach);
+			$this->tablesToDetach = new Set;
+		}
+
+		if ($this->tablesToAttach->count()) {
+			$this->addTables($queue, ...$this->tablesToAttach);
+			$this->tablesToAttach = new Set;
+		}
+
 		return $this;
 	}
 

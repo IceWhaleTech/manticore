@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
- Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+ Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2 or any later
@@ -193,17 +193,50 @@ class UnsupportedStmtHandler extends BaseHandlerWithClient {
 		if (preg_match('/^show( open)? tables from (Manticore|`Manticore`)(\s.*|$)/is', $payload->query)) {
 			$query = 'SHOW TABLES';
 			/** @var array{0:array{data:array<mixed>}} */
-			$result = $manticoreClient->sendRequest($query, $payload->path)->getResult();
+			$result = $manticoreClient->sendRequest($query)->getResult();
 			$data = $result[0]['data'];
 			return TaskResult::withData($data)
-				->column('Index', Column::String)
+				->column('Table', Column::String)
 				->column('Type', Column::String);
 		}
-		if (preg_match('/^show table status from (Manticore|`Manticore`)(\s.*|$)/is', $payload->query)) {
-			$query = 'SHOW TABLE STATUS';
-			/** @var array{0:array{data:array<mixed>}} */
-			$result = $manticoreClient->sendRequest($query, $payload->path)->getResult();
-			$data = $result[0]['data'];
+		$matches = [];
+		if (preg_match('/^show table status from( Manticore| `Manticore`)?(\s*.*|$)/is', $payload->query, $matches)) {
+			$query = 'SHOW TABLES';
+			/** @var array{0:array{data:array<int,array<mixed>>}} */
+			$result = $manticoreClient->sendRequest($query)->getResult();
+			$tableNames = array_map(
+				fn($item) => $item['Table'] ?? '',
+				$result[0]['data']
+			);
+			if (!$matches[1]) {
+				// A specific table has been requested
+				$reqTable = ltrim($matches[2]);
+				$tableNames = in_array($reqTable, $tableNames) ? [$reqTable] : [];
+			}
+			$data = array_map(
+				fn($t) => [
+					'Name' => $t,
+					'Engine' => 'MyISAM',
+					'Version' => '10',
+					'Row_format' => 'Dynamic',
+					'Rows' => 0,
+					'Avg_row_length' => 0,
+					'Data_length' => 0,
+					'Max_data_length' => 2533274790395903,
+					'Index_length' => 0,
+					'Data_free' => 0,
+					'Auto_increment' => 1,
+					'Create_time' => 'NULL',
+					'Update_time' => 'NULL',
+					'Check_time' => 'NULL',
+					'Collation' => 'utf8mb4_0900_ai_ci',
+					'Checksum' => 'NULL',
+					'Create_options' => '',
+					'Comment' => '',
+				],
+				$tableNames
+			);
+
 			return TaskResult::withData($data)
 				->column('Name', Column::String)
 				->column('Engine', Column::String)
@@ -246,10 +279,10 @@ class UnsupportedStmtHandler extends BaseHandlerWithClient {
 		if (stripos($payload->query, 'show charset') === 0) {
 			$data = [
 				[
-					'Charset' => 'utf8',
+					'Charset' => 'utf8mb4',
 					'Description' => 'UTF-8 Unicode',
-					'Default collation' => 'utf8_general_ci',
-					'Maxlen' => 3,
+					'Default collation' => 'utf8mb4_0900_ai_ci',
+					'Maxlen' => 4,
 				],
 			];
 			return TaskResult::withData($data)
@@ -261,7 +294,7 @@ class UnsupportedStmtHandler extends BaseHandlerWithClient {
 		if (stripos($payload->query, 'show variables') === 0) {
 			$query = 'SHOW VARIABLES';
 			/** @var array{0:array{data:array<int,array<mixed>>}} */
-			$result = $manticoreClient->sendRequest($query, $payload->path)->getResult();
+			$result = $manticoreClient->sendRequest($query)->getResult();
 			$condData = static::getVariablesWithCondition($result[0]['data'], $payload->query);
 			return TaskResult::withData($condData)
 				->column('Variable_name', Column::String)

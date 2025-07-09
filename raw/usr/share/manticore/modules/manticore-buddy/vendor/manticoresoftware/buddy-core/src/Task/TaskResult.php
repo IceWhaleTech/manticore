@@ -11,6 +11,9 @@
 
 namespace Manticoresearch\Buddy\Core\Task;
 
+use Manticoresearch\Buddy\Core\ManticoreSearch\Response;
+use Manticoresearch\Buddy\Core\Plugin\TableFormatter;
+
 /**
  * Simple struct for task result data
  */
@@ -21,35 +24,61 @@ final class TaskResult {
 	/** @var int  */
 	protected int $total = 0;
 
-	/** @var string|array<mixed> If we set this flag, we will return only data and skip all other fields */
-	protected string|array $raw;
+	/** @var mixed If we set this flag, we will return only data and skip all other fields */
+	protected mixed $raw;
+
+	/** @var array<string,mixed> */
+	protected array $meta = [];
 
 	/**
 	 * Initialize the empty result
-	 * @param array<mixed> $data
+	 * @param ?array<mixed> $data
 	 * @param string $error
 	 * @param string $warning
 	 *  It must contain HTTP error code that will be returned to client
 	 * @return void
 	 */
-	public function __construct(
-		protected array $data,
+	private function __construct(
+		protected ?array $data,
 		protected string $error,
 		protected string $warning
 	) {
-		$this->total = sizeof($data);
+		$this->total = $data ? sizeof($data) : 0;
 	}
 
 	/**
 	 * Entrypoint to create raw result, that we probably need in some cases
 	 * For example, elastic like responses, cli tables and so on
 	 * Prefer to not use raw when you return standard structure to the client response
-	 * @param string|array<mixed> $raw
+	 * @param mixed $raw
 	 * @return static
 	 */
-	public static function raw(string|array $raw): static {
+	public static function raw(mixed $raw): static {
 		$obj = new static([], '', '');
 		$obj->raw = $raw;
+		return $obj;
+	}
+
+	/**
+	 * Create new struct from a raw response of the Manticore to include meta in it also
+	 * @param Response $response
+	 * @return static
+	 */
+	public static function fromResponse(Response $response): static {
+		if ($response->isRaw()) {
+			return static::raw($response->getBody());
+		}
+
+		if ($response->hasError()) {
+			return new static(null, $response->getError() ?? '', $response->getWarning() ?? '');
+		}
+
+		// No error
+		$data = $response->hasData() ? $response->getData() : null;
+		$obj = new static($data, '', '');
+		$obj->columns = $response->getColumns();
+		$obj->meta = $response->getMeta();
+		$obj->total = $response->getTotal();
 		return $obj;
 	}
 
@@ -91,7 +120,7 @@ final class TaskResult {
 	}
 
 	/**
-	 * Entrypoint to the object creation with error ocurred
+	 * Entrypoint to the object creation with error occurred
 	 * @param string $error
 	 * @return static
 	 */
@@ -100,7 +129,7 @@ final class TaskResult {
 	}
 
 	/**
-	 * Entrypoint to the object creation with error ocurred
+	 * Entrypoint to the object creation with error occurred
 	 * @param string $warning
 	 * @return static
 	 */
@@ -108,6 +137,15 @@ final class TaskResult {
 		return new static([], '', $warning);
 	}
 
+	/**
+	 * Set meta data for the current result
+	 * @param array<string,mixed> $meta
+	 * @return static
+	 */
+	public function meta(array $meta): static {
+		$this->meta = $meta;
+		return $this;
+	}
 
 	/**
 	 * Set error for the current result
@@ -137,6 +175,15 @@ final class TaskResult {
 	public function data(array $data): static {
 		$this->data = $data;
 		$this->total = sizeof($data);
+		return $this;
+	}
+
+	/**
+	 * @param int $total
+	 * @return static
+	 */
+	public function total(int $total): static {
+		$this->total = $total;
 		return $this;
 	}
 
@@ -176,10 +223,18 @@ final class TaskResult {
 	}
 
 	/**
-	 * Get resulting struct without JSON encoding
-	 * @return string|array<mixed>|array{0:array{columns?:array<mixed>,data?:array<mixed>,total:int,error:string,warning:string}}
+	 * Get current meta for this result
+	 * @return array<string,mixed>
 	 */
-	public function getStruct(): string|array {
+	public function getMeta(): array {
+		return $this->meta;
+	}
+
+	/**
+	 * Get resulting struct without JSON encoding
+	 * @return mixed
+	 */
+	public function getStruct(): mixed {
 		if (isset($this->raw)) {
 			return $this->raw;
 		}
@@ -201,5 +256,17 @@ final class TaskResult {
 				'error' => $this->error,
 			] : [$struct]
 		;
+	}
+
+	/**
+	 * Get struct but in the way of formatted output
+	 * @param int $startTime
+	 * @return string
+	 */
+	public function getTableFormatted(int $startTime): string {
+		$tableFormatter = new TableFormatter();
+		// We have logic inside table formatter that check null or not
+		// and reply with Query OK or inserted 1 row etc
+		return $tableFormatter->getTable($startTime, $this->data, $this->total, $this->error);
 	}
 }

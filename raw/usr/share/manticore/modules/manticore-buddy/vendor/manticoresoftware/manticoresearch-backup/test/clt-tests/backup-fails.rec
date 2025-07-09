@@ -1,0 +1,92 @@
+––– block: start-searchd –––
+––– block: init-database –––
+––– input –––
+mysql -h0 -P9306 -e 'show tables'
+––– output –––
++---------------------+-------------+
+| Table               | Type        |
++---------------------+-------------+
+| distributed_index   | distributed |
+| rt_with_columnar    | rt          |
+| rt_without_columnar | rt          |
+| test                | rt          |
++---------------------+-------------+
+––– input –––
+mysql -h0 -P9306 -e 'show create table distributed_index'
+––– output –––
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table             | Create Table                                                                                                                                                              |
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| distributed_index | CREATE TABLE distributed_index type='distributed' local='rt_with_columnar' local='rt_without_columnar' agent='127.0.0.1:9312:plain_with_columnar, plain_without_columnar' |
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+mysql -h0 -P9306 -e 'show create table rt_with_columnar'
+––– output –––
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table            | Create Table                                                                                                                                                           |
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| rt_with_columnar | CREATE TABLE rt_with_columnar (
+id bigint,
+title text,
+category_id integer,
+price float,
+description string attribute engine='columnar',
+tags multi,
+attributes json
+) |
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+mysql -h0 -P9306 -e 'show create table rt_without_columnar'
+––– output –––
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table               | Create Table                                                                                                                                            |
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| rt_without_columnar | CREATE TABLE rt_without_columnar (
+id bigint,
+title text,
+category_id integer,
+price float,
+description string attribute,
+tags multi,
+attributes json
+) |
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+ls -lt /tmp/non-exist
+––– output –––
+ls: cannot access '/tmp/non-exist': No such file or directory
+––– input –––
+manticore-backup --backup-dir=/tmp/non-exist
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+%{DATETIME} [Error] Failed to find backup dir to store backup: /tmp/non-exist
+––– input –––
+manticore-backup --backup-dir=/tmp --tables=none
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file: /etc/manticoresearch/manticore.conf
+Tables to backup: none
+Backup dir: /tmp
+Manticore config
+endpoint =  http://%{IPADDR}:9312
+Manticore versions:
+manticore: %{VERSION}
+columnar: %{VERSION}
+secondary: %{VERSION}
+knn: %{VERSION}
+buddy: %{VERSION}
+%{DATETIME} [Info] Starting the backup...
+%{DATETIME} [Error] Can't find some of the tables: none
+––– input –––
+pgrep -f searchd | xargs kill
+––– output –––
+––– input –––
+manticore-backup --backup-dir=/tmp
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file: /etc/manticoresearch/manticore.conf
+Tables to backup: all tables
+Backup dir: /tmp
+Manticore config
+endpoint =  http://%{IPADDR}:9312
+%{DATETIME} [Error] Failed to send query to the Manticore Search daemon. Ensure that it is set up to listen for HTTP or HTTPS connections and has the appropriate certificates in place. Additionally, check the 'max_connections' setting in the configuration file to ensure that it has not been exceeded.

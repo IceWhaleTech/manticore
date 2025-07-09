@@ -4,6 +4,7 @@ namespace Manticoresearch\Buddy\Base\Plugin\Sharding;
 
 use Ds\Vector;
 use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
+use Manticoresearch\Buddy\Core\Tool\Buddy;
 use RuntimeException;
 
 final class State {
@@ -24,7 +25,7 @@ final class State {
 	public function __construct(
 		protected Client $client
 	) {
-		$this->table = '_sharding_state';
+		$this->table = 'system.sharding_state';
 	}
 
 	/**
@@ -55,22 +56,30 @@ final class State {
 			: $this->table
 		;
 		$now = time();
-		$encodedValue = addcslashes(json_encode($value) ?: '', "'");
+		$encodedValue = addcslashes(json_encode($value) ?: 'null', "'\\");
+
 		$query = match ($this->fetch($key)) {
 			null => "
 				INSERT INTO {$table}
 					(`key`, `value`, `updated_at`)
 						VALUES
-					('{$key}', '{$encodedValue}', {$now})
+					('{$key}', '[{$encodedValue}]', {$now})
 			",
 			default => "
 				UPDATE {$table} SET
 					`updated_at` = {$now},
-					`value` = '{$encodedValue}'
+					`value` = '[{$encodedValue}]'
 				WHERE `key` = '{$key}'
 			",
 		};
-		$this->client->sendRequest($query);
+
+		// Try to set key and log error in case of failure
+		$res = $this->client->sendRequest($query);
+		if ($res->hasError()) {
+			$error = $res->getError();
+			Buddy::debugvv("Sharding: Error while setting state key '{$key}': {$error}");
+		}
+
 		return $this;
 	}
 
@@ -92,7 +101,7 @@ final class State {
 		/** @var array{0:array{data?:array{0?:array{key:string,value:string}}}} $res */
 		$res = $this->client
 			->sendRequest(
-				"SELECT `key`, `value` FROM {$this->table} WHERE REGEX(`key`, '{$regex}')"
+				"SELECT `key`, value[0] AS value FROM {$this->table} WHERE REGEX(`key`, '{$regex}')"
 			)
 			->getResult();
 
@@ -101,7 +110,7 @@ final class State {
 		foreach (($res[0]['data'] ?? []) as $row) {
 			$list[] = [
 				'key' => $row['key'],
-				'value' => json_decode($row['value'], true),
+				'value' => simdjson_decode($row['value'], true),
 			];
 		}
 
@@ -116,12 +125,19 @@ final class State {
 	protected function fetch(string $key): mixed {
 		$res = $this->client
 			->sendRequest(
-				"SELECT value FROM {$this->table} WHERE key = '$key'"
+				"SELECT value[0] as value FROM {$this->table} WHERE key = '$key'"
 			)
 			->getResult();
 		/** @var array{0:array{data:array{0?:array{value:string}}}} $res */
-		$value = isset($res[0]['data'][0]) ? $res[0]['data'][0]['value'] : null;
-		return isset($value) ? json_decode($value, true) : null;
+		$value = $res[0]['data'][0]['value'] ?? null;
+		if (is_string($value)) {
+			$value = trim($value);
+			// Manticore returns unquoted string for empty string
+			if (!str_starts_with($value, '{') && !str_ends_with($value, '}')) {
+				return $value;
+			}
+		}
+		return isset($value) ? simdjson_decode($value, true) : null;
 	}
 
 	/**
@@ -135,13 +151,13 @@ final class State {
 				'Trying to initialize while already initialized.'
 			);
 		}
-		$query = "CREATE TABLE `{$this->table}` (
+		$query = "CREATE TABLE {$this->table} (
 			`key` string,
-			`value` string,
+			`value` json,
 			`updated_at` timestamp
 		)";
 		$this->client->sendRequest($query);
-		$this->cluster->attachTable($this->table);
+		$this->cluster->attachTables($this->table);
 	}
 
 	/**
@@ -149,6 +165,19 @@ final class State {
 	 * @return bool
 	 */
 	public function isActive(): bool {
-		return $this->client->hasTable($this->table);
+		$hasTable = $this->client->hasTable($this->table);
+		$hasRequiredFields = false;
+		if ($hasTable) {
+			$hasRequiredFields = true;
+			foreach (self::STATE_DEFAULTS as $key => $value) {
+				$value = $this->fetch($key);
+				if (!isset($value)) {
+					$hasRequiredFields = false;
+					break;
+				}
+			}
+		}
+
+		return $hasTable && $hasRequiredFields;
 	}
 }

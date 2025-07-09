@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
- Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+ Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2 or any later
@@ -32,6 +32,7 @@ class ElasticJSONInsertParser extends JSONInsertParser {
 	* @return void
 	*/
 	public function __construct(string $path) {
+		$this->isElasticQuery = true;
 		[$this->name, $this->id, $this->isBulkQuery] = $this->parseQueryPath($path);
 	}
 

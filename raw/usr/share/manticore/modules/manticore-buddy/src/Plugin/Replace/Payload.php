@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
-  Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+  Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License version 2 or any later
@@ -11,6 +11,7 @@
 
 namespace Manticoresearch\Buddy\Base\Plugin\Replace;
 
+use Manticoresearch\Buddy\Core\Error\GenericError;
 use Manticoresearch\Buddy\Core\Error\ManticoreSearchClientError;
 use Manticoresearch\Buddy\Core\ManticoreSearch\RequestFormat;
 use Manticoresearch\Buddy\Core\Network\Request;
@@ -22,13 +23,14 @@ use Manticoresearch\Buddy\Core\Plugin\BasePayload;
  * @phpstan-extends BasePayload<array>
  */
 final class Payload extends BasePayload {
-	public string $path;
+	public bool $isElasticLikePath;
 
 	public string $table;
 	/** @var array<string, bool|float|int|string> */
 	public array $set;
 	public int $id;
 	public string $type;
+	public ?string $cluster = null;
 
 	/**
 	 * Get description for this plugin
@@ -45,65 +47,74 @@ final class Payload extends BasePayload {
 	 */
 	public static function fromRequest(Request $request): static {
 		$self = new static();
-		$self->path = $request->path;
-		$self->type = $request->format->value;
+		$self->isElasticLikePath = str_contains($request->path, '/_update/');
 
-		if ($request->format->value === RequestFormat::SQL->value) {
+		if ($self->isElasticLikePath) {
+			$pathChunks = explode('/', $request->path);
+			$payload = simdjson_decode($request->payload, true);
 
+			self::parseClusterTableName($self, $pathChunks[0] ?? '');
+			$self->id = (int)$pathChunks[2];
+
+			if (is_array($payload)) {
+				$self->set = $payload['doc'] ?? [];
+			}
+		} else {
 			/** @var array{REPLACE:array<int, array{table?:string, expr_type: string, base_expr: string,
 			 *   no_quotes: array{parts: array<int, string>}}>,
 			 *   SET:array<int, array{expr_type: string, sub_tree: array<int, array{base_expr: string}>}>,
 			 *   WHERE:array<int, array{base_expr: string}>} $payload
 			 */
 			$payload = static::$sqlQueryParser::getParsedPayload();
-
-			$self->table = self::parseTable($payload['REPLACE']);
+			self::parseClusterTableName($self, self::parseTable($payload['REPLACE']));
 			$self->set = self::parseSet($payload['SET']);
 			$self->id = (int)$payload['WHERE'][2]['base_expr'];
-		} else {
-			$pathChunks = explode('/', $request->path);
-			$payload = json_decode($request->payload, true);
-
-
-			$self->table = $pathChunks[0] ?? '';
-			$self->id = (int)$pathChunks[2];
-
-			if (is_array($payload)) {
-				$self->set = $payload['doc'] ?? [];
-			}
 		}
+
 		return $self;
+	}
+
+	private static function parseClusterTableName(self $self, string $tableName): void {
+
+		if (str_contains($tableName, ':')) {
+			$exploded = explode(':', $tableName);
+			$self->table = trim($exploded[1]);
+			$self->cluster = trim($exploded[0]);
+
+			return;
+		}
+
+		$self->table = trim($tableName);
 	}
 
 	/**
 	 * @param Request $request
+	 *
 	 * @return bool
-	 */
+	 * @throws GenericError
+  */
 	public static function hasMatch(Request $request): bool {
-
-		if ($request->format->value === RequestFormat::SQL->value) {
-			$payload = static::$sqlQueryParser::parse(
-				$request->payload,
-				fn($request) => (
-					str_contains($request->error, "P01: syntax error, unexpected SET, expecting VALUES near '")
-					&& stripos($request->payload, 'replace') !== false
-					&& stripos($request->payload, 'set') !== false
-					&& stripos($request->payload, 'where') !== false),
-				$request
-			);
-
-			if (isset($payload['REPLACE'])
-				&& isset($payload['SET'])
-				&& isset($payload['WHERE'][0]['base_expr']) && $payload['WHERE'][0]['base_expr'] === 'id'
-				&& isset($payload['WHERE'][1]['base_expr']) && $payload['WHERE'][1]['base_expr'] === '='
-				&& isset($payload['WHERE'][2]['base_expr']) && is_numeric($payload['WHERE'][2]['base_expr'])
-				&& sizeof($payload['WHERE']) === 3) {
-				return true;
-			}
-			return false;
+		if ($request->format->value === RequestFormat::JSON->value && str_contains($request->path, '/_update/')) {
+			// We process Elastic-like update requests no matter what
+			return true;
 		}
+		$payload = static::$sqlQueryParser::parse(
+			$request->payload,
+			fn($request) => (
+				str_contains($request->error, "P01: syntax error, unexpected SET, expecting VALUES near '")
+				&& stripos($request->payload, 'replace') === 0
+				&& stripos($request->payload, 'set') !== false
+				&& stripos($request->payload, 'where') !== false),
+			$request
+		);
 
-		return str_contains($request->path, '/_update/');
+		return (isset($payload['REPLACE'])
+			&& isset($payload['SET'])
+			&& isset($payload['WHERE'][0]['no_quotes']['parts'][0])
+			&& $payload['WHERE'][0]['no_quotes']['parts'][0] === 'id'
+			&& isset($payload['WHERE'][1]['base_expr']) && $payload['WHERE'][1]['base_expr'] === '='
+			&& isset($payload['WHERE'][2]['base_expr']) && is_numeric($payload['WHERE'][2]['base_expr'])
+			&& sizeof($payload['WHERE']) === 3);
 	}
 
 	/**

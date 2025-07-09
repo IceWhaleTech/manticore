@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
-  Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+  Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License version 2 or any later
@@ -12,6 +12,7 @@
 namespace Manticoresearch\Buddy\Base\Plugin\Show;
 
 use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
+use Manticoresearch\Buddy\Core\Network\Struct;
 use Manticoresearch\Buddy\Core\Plugin\BaseHandlerWithClient;
 use Manticoresearch\Buddy\Core\Task\Column;
 use Manticoresearch\Buddy\Core\Task\Task;
@@ -50,17 +51,17 @@ final class VersionHandler extends BaseHandlerWithClient
 	}
 
 	/**
-	 * @param  mixed  $result
+	 * @param Struct<int|string, mixed> $result
 	 * @return array<int<0, max>, array<string, string>>
 	 */
-	private static function parseVersions(mixed $result):array {
+	private static function parseVersions(Struct $result):array {
 		$versions = [];
-		if (is_array($result) && isset($result[0]['data'][0]['Value'])) {
+		if (is_array($result[0]) && isset($result[0]['data'][0]['Value'])) {
 			$value = $result[0]['data'][0]['Value'];
 
 			$splittedVersions = explode('(', $value);
 
-			foreach ($splittedVersions as $version) {
+			foreach ($splittedVersions as $n => $version) {
 				$version = trim($version);
 
 				if ($version[mb_strlen($version) - 1] === ')') {
@@ -68,13 +69,7 @@ final class VersionHandler extends BaseHandlerWithClient
 				}
 
 				$exploded = explode(' ', $version);
-
-				$component = 'Daemon';
-				if (in_array($exploded[0], ['columnar', 'secondary', 'buddy'])) {
-					$component = ucfirst($exploded[0]);
-				} elseif ($exploded[0] === 'knn') {
-					$component = 'KNN';
-				}
+				$component = $n > 0 ? ucfirst($exploded[0]) : 'Daemon';
 
 				$versions[] = ['Component' => $component, 'Version' => $version];
 			}

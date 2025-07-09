@@ -18,6 +18,7 @@ use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
 use Manticoresearch\Buddy\Core\Plugin\BaseHandlerWithClient;
 use Manticoresearch\Buddy\Core\Task\Task;
 use Manticoresearch\Buddy\Core\Task\TaskResult;
+use Manticoresearch\Buddy\Core\Tool\Buddy;
 use PHPSQLParser\PHPSQLCreator;
 use PHPSQLParser\exceptions\UnsupportedFeatureException;
 
@@ -138,17 +139,18 @@ final class CreateViewHandler extends BaseHandlerWithClient {
 
 			$sql = /** @lang ManticoreSearch */
 				'SELECT * FROM ' . Payload::SOURCE_TABLE_NAME .
-				" WHERE match('@name \"" . $sourceName . "\"')";
+				" WHERE name='$sourceName'";
 
-			$sourceRecords = $manticoreClient->sendRequest($sql)->getResult();
+			$result = $manticoreClient->sendRequest($sql)->getResult();
 
-			if (is_array($sourceRecords[0]) && empty($sourceRecords[0]['data'])) {
+			if (is_array($result[0]) && empty($result[0]['data'])) {
 				throw ManticoreSearchClientError::create('Chosen source not exist');
 			}
 
 			unset($parsedPayload['CREATE'], $parsedPayload['VIEW']);
-
-			$sourceRecords = $sourceRecords[0]['data'];
+			/** @var array{data:array<int,array<string,string>>} $resultStruct */
+			$resultStruct = $result[0];
+			$sourceRecords = $resultStruct['data'];
 
 			$newViews = self::createViewRecords(
 				$manticoreClient, $viewName, $parsedPayload,
@@ -179,9 +181,10 @@ final class CreateViewHandler extends BaseHandlerWithClient {
 	 * @param int $iterations
 	 * @param int $startFrom
 	 * @param int $suspended
+	 *
 	 * @return array<string, array<string, string>>
 	 * @throws ManticoreSearchClientError
-	 * @throws UnsupportedFeatureException
+	 * @throws UnsupportedFeatureException|GenericError
 	 */
 	public static function createViewRecords(
 		Client $client,
@@ -198,14 +201,23 @@ final class CreateViewHandler extends BaseHandlerWithClient {
 		$results = [];
 
 		for ($i = $startFrom; $i < $iterations; $i++) {
-			$bufferTableName = "_buffer_{$sourceName}_$i";
+			$bufferTableName = Payload::BUFFER_TABLE_PREFIX.$sourceName."_$i";
 			$sourceFullName = "{$sourceName}_$i";
 
 			$parsedQuery['FROM'][0]['table'] = $bufferTableName;
 			$parsedQuery['FROM'][0]['no_quotes']['parts'] = [$bufferTableName];
 			$parsedQuery['FROM'][0]['base_expr'] = $bufferTableName;
 
-			$query = (new PHPSQLCreator())->create($parsedQuery);
+			$query = '';
+			try {
+				$query = (new PHPSQLCreator())->create($parsedQuery);
+			} catch (\Exception $exception) {
+				$message = "Can\'t compile SELECT query from ".json_encode($parsedQuery);
+				Buddy::debugvv($message);
+				Buddy::debugvv($exception->getMessage());
+				GenericError::throw($message);
+			}
+
 			$escapedQuery = str_replace("'", "\\'", $query);
 			$escapedOriginalQuery = str_replace("'", "\\'", $originalQuery);
 
@@ -264,7 +276,7 @@ final class CreateViewHandler extends BaseHandlerWithClient {
 
 		$sql = /** @lang ManticoreSearch */
 			'CREATE TABLE ' . Payload::VIEWS_TABLE_NAME .
-			' (id bigint, name text, source_name text, destination_name text, ' .
+			' (id bigint, name text attribute indexed, source_name text, destination_name text, ' .
 			'query text, original_query text, suspended bool)';
 
 		$request = $manticoreClient->sendRequest($sql);

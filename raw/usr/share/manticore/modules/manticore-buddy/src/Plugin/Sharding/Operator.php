@@ -28,7 +28,7 @@ final class Operator {
 	}
 
 	/**
-	 * Just extra function that is requried to run once all setup
+	 * Just extra function that is required to run once all setup
 	 * This function sets additional cluster and queue property
 	 * that we cannot set on other stages and can do only after
 	 * we know which cluster we run or not at all
@@ -37,6 +37,7 @@ final class Operator {
 	protected function init(): static {
 		/** @var string */
 		$clusterName = $this->state->get('cluster');
+		Buddy::debug("Sharding: initializing under cluster {$clusterName}");
 		$this->cluster = new Cluster(
 			$this->client,
 			$clusterName,
@@ -70,7 +71,7 @@ final class Operator {
 			return $this;
 		}
 
-		// If the master node is incative, we are taking it over
+		// If the master node is inactive, we are taking it over
 		$cluster = $this->getCluster();
 		$inactiveNodes = $cluster->getInactiveNodes();
 		$isMasterInactive = $inactiveNodes->contains($master);
@@ -188,6 +189,7 @@ final class Operator {
 		$table = new Table($this->client, $cluster, ...$table);
 		$shouldSetup = !$this->state->get('master');
 		if ($shouldSetup) {
+			Buddy::debug("Sharding: setuping cluster {$cluster->name}");
 			$this->state->setCluster($cluster);
 			$this->state->setup();
 			$this->becomeMaster();
@@ -211,9 +213,7 @@ final class Operator {
 			$this->state->set('cluster_hash', Cluster::getNodesHash($cluster->getNodes()));
 			$this->init();
 			$currentQueue = $this->getQueue();
-			$cluster->attachTable($this->state->table);
-			$cluster->attachTable($currentQueue->table);
-			$cluster->attachTable($table->table);
+			$cluster->attachTables($this->state->table, $currentQueue->table, $table->table);
 		}
 
 		$result = $table->shard(
@@ -227,6 +227,36 @@ final class Operator {
 	}
 
 	/**
+	 * Drop table the whole sharded table
+	 * @param array{name:string,cluster:string} $table
+	 * @return void
+	 */
+	public function drop(array $table): void {
+		// Get the current stats first
+		/** @var array{result:string,status:string,structure:string,extra:string}|null $currentState */
+		$currentState = $this->state->get("table:{$table['name']}");
+		if (!$currentState) {
+			return;
+		}
+
+		// Prepare cluster and Table to operate with
+		$cluster = new Cluster(
+			$this->client,
+			$table['cluster'],
+			Node::findId($this->client),
+		);
+		$table = new Table(
+			$this->client,
+			$cluster,
+			$table['name'],
+			$currentState['structure'],
+			$currentState['extra']
+		);
+		$result = $table->drop($this->getQueue());
+		$this->state->set("table:{$table->name}", $result);
+	}
+
+	/**
 	 * Helper to run table status checker on pings
 	 * It should return true when we done or false to repeat
 	 * @param  string $table
@@ -234,8 +264,9 @@ final class Operator {
 	 */
 	public function checkTableStatus(string $table): bool {
 		$stateKey = "table:{$table}";
-		/** @var array{}|array{queue_ids:array<int>,status:string} */
+		/** @var array{}|array{queue_ids:array<int>,status:string,type:string} */
 		$result = $this->state->get($stateKey);
+		Buddy::debugvv("Sharding: table status of {$table}: " . json_encode($result));
 		if (!$result) {
 			return false;
 		}
@@ -250,14 +281,15 @@ final class Operator {
 
 			++$processed;
 		}
+		Buddy::debugvv("Sharding: table status of {$table}: queue size: {$queueSize}, processed: {$processed}");
 
 		$isProcessed = $processed === $queueSize;
 		// Update the state
 		if ($isProcessed) {
 			$result['status'] = 'done';
-			$result['result'] = getenv('DEBUG')
-				? $this->client->sendRequest("SHOW CREATE TABLE {$table}")->getResult()
-				: TaskResult::none()->getStruct();
+			$result['result'] = getenv('DEBUG') && $result['type'] === 'create'
+			? $this->client->sendRequest("SHOW CREATE TABLE {$table} OPTION force=1")->getBody()
+			: TaskResult::none()->toString();
 			$this->state->set($stateKey, $result);
 		}
 

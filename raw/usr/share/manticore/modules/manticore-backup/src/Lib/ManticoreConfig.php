@@ -76,8 +76,7 @@ class ManticoreConfig {
 		$this->port = 9308;
 
 	  // Try to parse and replace defaults
-		preg_match_all('/^\s*(listen|data_dir|lemmatizer_base|sphinxql_state)\s*=\s*(.*)$/ium', $config, $m);
-		if ($m) {
+		if (preg_match_all('/^\s*(listen|data_dir|lemmatizer_base|sphinxql_state)\s*=\s*(.*)$/ium', $config, $m)) {
 			$endpoints = [];
 			foreach ($m[1] as $n => $key) {
 				$value = trim($m[2][$n]);
@@ -184,8 +183,20 @@ class ManticoreConfig {
 			$result[] = $this->sphinxqlState;
 		}
 
+		// Lemmatizer base is a directory of modules by default
+		// so we are looking for .pak files in it and add only those
+		// to prevent adding all files in the directory that should not be backed up
 		if (isset($this->lemmatizerBase) && is_dir($this->lemmatizerBase)) {
-			$result[] = $this->lemmatizerBase;
+			$files = glob($this->lemmatizerBase . '/*.pak');
+			if ($files) {
+				foreach ($files as $file) {
+					if (!is_file($file)) {
+						continue;
+					}
+
+					$result[] = $file;
+				}
+			}
 		}
 
 		return $result;

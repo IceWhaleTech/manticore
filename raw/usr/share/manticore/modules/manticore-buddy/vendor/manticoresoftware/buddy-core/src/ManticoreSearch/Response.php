@@ -12,31 +12,58 @@
 namespace Manticoresearch\Buddy\Core\ManticoreSearch;
 
 use Manticoresearch\Buddy\Core\Error\ManticoreSearchResponseError;
+use Manticoresearch\Buddy\Core\Network\Struct;
 use Throwable;
 
+/** @package Manticoresearch\Buddy\Core\ManticoreSearch */
 class Response {
-
 	/**
-	 * @var array<string,mixed> $data
+	 * @var Struct<int|string, mixed>
 	 */
-	protected array $data;
+	protected Struct $result;
+
+	/** @var bool */
+	protected bool $isRaw = false;
 
 	/**
 	 * @var array<string,mixed> $columns
 	 */
-	protected array $columns;
+	protected array $columns = [];
 
 	/**
-	 * @var ?string $error
+	 * @var array<string,mixed> $data
 	 */
-	protected ?string $error;
+	protected array $data = [];
+
+	/** @var bool */
+	protected bool $hasData = false;
 
 	/**
-	 * @param ?string $body
+	 * @var string $error
+	 */
+	protected string $error = '';
+
+	/**
+	 * @var string $warning
+	 */
+	protected string $warning = '';
+
+	/**
+	 * @var int $total
+	 */
+	protected int $total = 0;
+
+	/**
+	 * @var array<string,string> $meta
+	 */
+	protected array $meta = [];
+
+	/**
+	 * @param string $body
 	 * @return void
 	 */
-	public function __construct(
-		protected ?string $body = null
+	private function __construct(
+		protected string $body
 	) {
 		$this->parse();
 	}
@@ -44,23 +71,121 @@ class Response {
 	/**
 	 * @return ?string
 	 */
-	public function getError(): string|null {
+	public function getError(): ?string {
 		return $this->error;
+	}
+
+	/**
+	 * @return ?string
+	 */
+	public function getWarning(): ?string {
+		return $this->warning;
 	}
 
 	/**
 	 * @return string
 	 */
 	public function getBody(): string {
-		return (string)$this->body;
+		return $this->body;
+	}
+
+	/**
+	 * @param callable $fn
+	 * @return static
+	 */
+	public function mapData(callable $fn): static {
+		$this->data = array_map($fn, $this->data);
+		return $this;
+	}
+
+	/**
+	 * @param callable $fn
+	 * @return static
+	 */
+	public function filterData(callable $fn): static {
+		$this->data = array_filter($this->data, $fn);
+		return $this;
+	}
+
+	/**
+	 * @param array<string,mixed> $data
+	 * @return static
+	 */
+	public function extendData(array $data): static {
+		$this->data = array_merge($this->data, $data);
+		return $this;
+	}
+
+	/**
+	 * Apply some function to the whole result
+	 * @param callable $fn
+	 * @return static
+	 */
+	public function apply(callable $fn): static {
+		// We restruct it due to we unable to do unset and idirect modifications
+		$this->result = Struct::fromData($fn($this->result->toArray()));
+		return $this;
 	}
 
 	/**
 	 * Get parsed and json decoded reply from the Manticore daemon
-	 * @return array<mixed>
+	 * @return Struct<int|string, mixed>
 	 */
-	public function getResult(): array {
-		return (array)json_decode($this->getBody(), true);
+	public function getResult(): Struct {
+		if (!isset($this->result)) {
+			throw new ManticoreSearchResponseError('Trying to access result with no response created');
+		}
+		// We should replace data as result of applying modifier functions
+		// like filter, map or whatever
+		// @phpstan-ignore-next-line
+		if (isset($this->result[0]['data'])) {
+			$item = $this->result[0];
+			// @phpstan-ignore-next-line
+			$item['data'] = $this->data;
+			$result[0] = $item;
+		} elseif (isset($this->result['data'])) {
+			$this->result['data'] = $this->data;
+		}
+
+		return $this->result;
+	}
+
+	/**
+	 * @return array<string,mixed>
+	 */
+	public function getData(): array {
+		return $this->data;
+	}
+
+	/**
+	 * @return array<string,mixed>
+	 */
+	public function getColumns(): array {
+		return $this->columns;
+	}
+
+	/**
+	 * @return int
+	 */
+	public function getTotal(): int {
+		return $this->total;
+	}
+
+	/**
+	 * @param array<string,string> $meta
+	 * @return static
+	 */
+	public function setMeta(array $meta): static {
+		$this->meta = $meta;
+		return $this;
+	}
+
+	/**
+	 * Return the meta data from the request
+	 * @return array<string,string>
+	 */
+	public function getMeta(): array {
+		return $this->meta;
 	}
 
 	/**
@@ -68,7 +193,22 @@ class Response {
 	 * @return bool
 	 */
 	public function hasError(): bool {
-		return isset($this->error);
+		return !!$this->error;
+	}
+
+	/**
+	 * Check if we had warning on performing our request
+	 * @return bool
+	 */
+	public function hasWarning(): bool {
+		return !!$this->warning;
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function hasData(): bool {
+		return $this->hasData;
 	}
 
 	/**
@@ -80,7 +220,7 @@ class Response {
 	 */
 	public function postprocess(callable $processor, array $args = []): void {
 		try {
-			$this->body = $processor($this->body, $this->data, $this->columns, ...$args);
+			$this->body = $processor($this->body, $this->result, $this->columns, ...$args);
 		} catch (Throwable $e) {
 			throw new ManticoreSearchResponseError("Postprocessing function failed to run: {$e->getMessage()}");
 		}
@@ -93,31 +233,61 @@ class Response {
 	 * @throws ManticoreSearchResponseError
 	 */
 	protected function parse(): void {
-		if (!isset($this->body)) {
-			return;
+		if (!$this->body) {
+			throw new ManticoreSearchResponseError('Trying to parse empty response');
 		}
-		$data = json_decode($this->body, true);
-		if (!is_array($data)) {
+		$isValid = Struct::isValid($this->body);
+		if (!$isValid) {
 			throw new ManticoreSearchResponseError('Invalid JSON found');
 		}
-		if (empty($data)) {
+
+		$struct = Struct::fromJson($this->body);
+		$this->result = $struct;
+		if ($struct->isList()) {
+			/** @var array<string,mixed> */
+			$data = $struct[0];
+			$struct = Struct::fromData($data, $struct->getBigIntFields());
+		}
+
+		// A bit tricky but we need to know if we have data or not
+		// For table formatter in current architecture
+		$this->hasData = $struct->hasKey('data');
+
+		// Check if this is type of response that is not our scheme
+		// in this case we just may proxy it as is without any extra
+		$this->isRaw = !$struct->hasKey('warning') &&
+			(!$struct->hasKey('error') || !is_string($struct['error'])) &&
+			!$struct->hasKey('total');
+
+		// Assign only if not raw
+		if ($this->isRaw) {
 			return;
 		}
-		if (array_is_list($data)) {
-			/** @var array<string,string> */
-			$data = $data[0];
+
+		$this->assign($struct, 'error')
+			->assign($struct, 'warning')
+			->assign($struct, 'total')
+			->assign($struct, 'data')
+			->assign($struct, 'columns');
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function isRaw(): bool {
+		return $this->isRaw;
+	}
+
+	/**
+	 * @param Struct<int|string, mixed> $struct
+	 * @param string $key
+	 * @return static
+	 */
+	public function assign(Struct $struct, string $key): static {
+		if ($struct->hasKey($key)) {
+			$this->$key = $struct[$key];
 		}
-		if (array_key_exists('error', $data) && is_string($data['error']) && $data['error'] !== '') {
-			$this->error = $data['error'];
-		} else {
-			$this->error = null;
-		}
-		foreach (['columns', 'data'] as $prop) {
-			if (!array_key_exists($prop, $data) || !is_array($data[$prop])) {
-				continue;
-			}
-			$this->$prop = $data[$prop];
-		}
+		return $this;
 	}
 
 	/**

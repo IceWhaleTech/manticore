@@ -12,12 +12,14 @@ namespace Manticoresearch\Buddy\Base\Plugin\Select;
 
 use Exception;
 use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
+use Manticoresearch\Buddy\Core\ManticoreSearch\MySQLTool;
 use Manticoresearch\Buddy\Core\Plugin\BaseHandler;
 use Manticoresearch\Buddy\Core\Task\Column;
 use Manticoresearch\Buddy\Core\Task\Task;
 use Manticoresearch\Buddy\Core\Task\TaskResult;
 use RuntimeException;
 
+/** @package Manticoresearch\Buddy\Base\Plugin\Select */
 final class Handler extends BaseHandler {
 	const TABLES_FIELD_MAP = [
 		'engine' => ['field', 'engine'],
@@ -26,10 +28,33 @@ final class Handler extends BaseHandler {
 	];
 
 	const COLUMNS_FIELD_MAP = [
-		'extra' => ['static', ''],
-		'generation_expression' => ['static', ''],
-		'column_name' => ['field', 'Field'],
-		'data_type' => ['field', 'Type'],
+		'EXTRA' => ['static', ''],
+		'GENERATION_EXPRESSION' => ['static', ''],
+		'COLUMN_NAME' => ['field', 'Field'],
+		'COLUMN_TYPE' => ['field', 'Type'],
+		'DATA_TYPE' => ['field', 'Type'],
+		'SCHEMA_NAME' => ['field', 'Databases'],
+	];
+
+	const DEFAULT_FIELD_VALUES = [
+		'ENGINE' => 'MyISAM',
+		'TABLE_COLLATION' => 'utf8mb4_general_ci',
+		'DEFAULT_CHARACTER_SET_NAME' => 'utf8mb4',
+		'DEFAULT_COLLATION_NAME' => 'utf8mb4_general_ci',
+		'IS_NULLABLE' => 'yes',
+		'CREATE_TIME' => '2024-01-01 00:00:00',
+		'UPDATE_TIME' => '2024-01-01 00:00:00',
+		'ROW_FORMAT' => 'Dynamic',
+		'VERSION' => 10,
+		'TABLE_ROWS' => 0,
+		'AVG_ROW_LENGTH' => 4096,
+		'DATA_LENGTH' => 16384,
+		'MAX_DATA_LENGTH' => 0,
+		'INDEX_LENGTH' => 0,
+		'DATA_FREE' => 0,
+		'TABLE_COMMENT' => '',
+		'CREATE_OPTIONS' => '',
+		'AUTO_INCREMENT' => '',
 	];
 
   /** @var Client $manticoreClient */
@@ -80,6 +105,7 @@ final class Handler extends BaseHandler {
 
 			return match ($payload->table) {
 				'information_schema.columns' => static::handleSelectFromColumns($manticoreClient, $payload),
+				'information_schema.schemata' => static::handleSelectFromSchemata($manticoreClient, $payload),
 				'information_schema.tables' => static::handleSelectFromTables($manticoreClient, $payload),
 				default => static::handleSelectFromExistingTable($manticoreClient, $payload),
 			};
@@ -182,11 +208,12 @@ final class Handler extends BaseHandler {
 				foreach ($createTables as $createTable) {
 					$row = static::parseTableSchema($createTable);
 					$data[$i] = [];
+					self::unifyFieldNames($payload->fields);
 					foreach ($payload->fields as $field) {
 						[$type, $value] = static::TABLES_FIELD_MAP[$field]
-							?? static::TABLES_FIELD_MAP[strtolower($field)] ?? ['field', $field];
+							?? static::TABLES_FIELD_MAP[strtolower($field)] ?? ['field', strtolower($field)];
 						$data[$i][$field] = match ($type) {
-							'field' => $row[$value],
+							'field' => $row[$value] ?? (static::DEFAULT_FIELD_VALUES[$field] ?? null),
 							'table' => $table,
 							'static' => $value,
 							// default => $row[$field] ?? null,
@@ -196,7 +223,7 @@ final class Handler extends BaseHandler {
 				}
 			}
 		} else {
-			$data = static::processSelectOtherFromFromTables($manticoreClient, $payload);
+			$data = static::processSelectOtherFromTables($manticoreClient, $payload);
 		}
 
 		$result = $payload->getTaskResult();
@@ -206,9 +233,9 @@ final class Handler extends BaseHandler {
 	/**
 	 * @param Client $manticoreClient
 	 * @param Payload $payload
-	 * @return array<array<string,string>>
+	 * @return array<array<string,mixed>>
 	 */
-	protected static function processSelectOtherFromFromTables(Client $manticoreClient, Payload $payload): array {
+	protected static function processSelectOtherFromTables(Client $manticoreClient, Payload $payload): array {
 		$data = [];
 		// grafana: SELECT DISTINCT TABLE_SCHEMA from information_schema.TABLES
 		// where TABLE_TYPE != 'SYSTEM VIEW' ORDER BY TABLE_SCHEMA
@@ -218,18 +245,31 @@ final class Handler extends BaseHandler {
 			$data[] = [
 				'TABLE_SCHEMA' => 'Manticore',
 			];
-		} elseif (sizeof($payload->fields) === 1 && stripos($payload->fields[0], 'table_name') !== false) {
+		} elseif (stripos($payload->fields[0], 'table_name') !== false) {
+			self::unifyFieldNames($payload->fields);
 			$query = 'SHOW TABLES';
 			/** @var array<array{data:array<array<string,string>>}> */
 			$tablesResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
-			foreach ($tablesResult[0]['data'] as $row) {
-				$data[] = [
-					'TABLE_NAME' => $row['Index'],
-				];
+			$row = $tablesResult[0]['data'][0];
+			$dataRow = [];
+			foreach ($payload->fields as $f) {
+				$dataRow[$f] = self::getFieldValue($f, $row);
 			}
+			$data[] = $dataRow;
 		}
 
 		return $data;
+	}
+
+	/**
+	 * @param array<string> $fieldNames
+	 * @return void
+	 */
+	protected static function unifyFieldNames(array &$fieldNames):void {
+		foreach ($fieldNames as $i => $f) {
+			// Removing table alias part from field names and converting them to uppercase
+			$fieldNames[$i] = strtoupper((string)preg_replace('/^.+\./', '', $f));
+		}
 	}
 
 	/**
@@ -245,32 +285,70 @@ final class Handler extends BaseHandler {
 		string $field,
 		string $value,
 		array &$fields,
-		array &$dataRow
+		array &$dataRow,
+		?MySQLTool $mySQLTool,
 	): void {
+		$dataTypeMap = [
+			'string' => 'VARCHAR',
+			'uint' => 'INT UNSIGNED',
+			'boolean' => 'BOOL',
+		];
 		foreach (static::COLUMNS_FIELD_MAP as $mapKey => $mapInfo) {
-			$mapKey = strtoupper($mapKey);
 			if ($mapInfo[1] !== $field) {
 				continue;
 			}
 			if (!in_array($mapKey, $fields)) {
 				array_push($fields, $mapKey);
 			}
+			//  We need to map Manticore data types to respective MySQL types to avoid problems with MYSQL tools
+			//  Also, the HeidiSQL tool doesn't recognize lowercase data types so we add this extra transformation
+			if ($mySQLTool && ($mapKey === 'DATA_TYPE' || $mapKey === 'COLUMN_TYPE')) {
+				$value = strtoupper($dataTypeMap[$value] ?? $value);
+			}
 			$dataRow[$mapKey] = $value;
 		}
+
+		if ($mySQLTool === null || $mySQLTool !== MySQLTool::HEIDI) {
+			return;
+		}
 		// Adding the character set columns with fake data since they're mandatory for HeidiSQL
-		$extraColumns = [
-			'CHARACTER_SET_NAME',
-			'COLLATION_NAME',
-			'IS_NULLABLE',
-			'COLUMN_DEFAULT',
+		$extraColumnMap = [
+			'CHARACTER_SET_NAME' => 'utf8_general_ci',
+			'COLLATION_NAME' => 'utf8mb4',
+			'IS_NULLABLE' => 'YES',
+			'COLUMN_DEFAULT' => 'NULL',
 		];
 		if (!in_array('CHARACTER_SET_NAME', $fields)) {
-			array_push($fields, ...$extraColumns);
+			array_push($fields, ...array_keys($extraColumnMap));
 		}
-		$dataRow['CHARACTER_SET_NAME'] = 'utf8_general_ci';
-		$dataRow['COLLATION_NAME'] = 'utf8mb4';
-		$dataRow['IS_NULLABLE'] = 'YES';
-		$dataRow['COLUMN_DEFAULT'] = 'NULL';
+		$dataRow += $extraColumnMap;
+	}
+
+	/**
+	 * @param Client $manticoreClient
+	 * @param Payload $payload
+	 * @return TaskResult
+	 */
+	protected static function handleSelectFromSchemata(Client $manticoreClient, Payload $payload): TaskResult {
+		$query = 'SHOW DATABASES';
+		/** @var array<array{data:array<array<string,string>>}> */
+		$queryResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
+		$data = [];
+		$i = 0;
+		self::unifyFieldNames($payload->fields);
+		foreach ($queryResult[0]['data'] as $row) {
+			$data[$i] = [];
+			foreach ($payload->fields as $field) {
+				[$type, $value] = static::COLUMNS_FIELD_MAP[$field] ?? ['field', strtolower($field)];
+				$data[$i][$field] = match ($type) {
+					'field' => $row[$value] ?? self::getFieldValue($field, $row),
+					default => null,
+				};
+			}
+			++$i;
+		}
+		$result = $payload->getTaskResult();
+		return $result->data($data);
 	}
 
 	/**
@@ -279,44 +357,95 @@ final class Handler extends BaseHandler {
 	 * @return TaskResult
 	 */
 	protected static function handleSelectFromColumns(Client $manticoreClient, Payload $payload): TaskResult {
-		$table = $payload->where['table_name']['value'] ?? $payload->where['TABLE_NAME']['value'] ?? null;
-		// As for now, if an original query does not contain a table name we definitely can stop further processing
+		$table = match (true) {
+			isset($payload->where['table_name']['value']) => $payload->where['table_name']['value'],
+			isset($payload->where['TABLE_NAME']['value']) => $payload->where['TABLE_NAME']['value'],
+			isset($payload->where['table_schema']['value']) => $payload->where['table_schema']['value'],
+			default => null,
+		};
+
 		if ($table === null) {
-			return $payload->getTaskResult();
+			$matches = [];
+			// Table name still can be passed in one of conditional queries so we try to get it from there too
+			preg_match("/table_name\s+IN\s+\('(.*)'\)/is", $payload->originalQuery, $matches);
+			if (!$matches || !isset($matches[1])) {
+				return $payload->getTaskResult();
+			}
+			$table = (string)$matches[1];
 		}
 
+		if ($table === 'Manticore') {
+			// Some MySQL tools require info on columns from all database tables available
+			$query = 'SHOW TABLES';
+			/** @var array<array{data:array<array{Table:string}>}> */
+			$showResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
+			$tables = array_map(
+				fn ($row) => $row['Table'],
+				$showResult[0]['data']
+			);
+			$data = [];
+			foreach ($tables as $table) {
+				$data = [...$data, ...self::getTableColumns($table, $manticoreClient, $payload)];
+			}
+		} else {
+			$data = self::getTableColumns((string)$table, $manticoreClient, $payload);
+		}
+
+		$result = $payload->getTaskResult();
+		return $result->data($data);
+	}
+
+	/**
+	 * @param string $table
+	 * @param Client $manticoreClient
+	 * @param Payload $payload
+	 * @return array<array<string,mixed>>
+	 */
+	protected static function getTableColumns(string $table, Client $manticoreClient, Payload $payload): array {
+		$data = [];
 		$query = "DESC {$table}";
 		/** @var array<array{data:array<array<string,string>>}> */
 		$descResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
 
-		$data = [];
-		$i = 0;
 		$areAllColumnsSelected = sizeof($payload->fields) === 1 && $payload->fields[0] === '*';
 		if ($areAllColumnsSelected) {
 			$payload->fields = [];
 		}
 		foreach ($descResult[0]['data'] as $row) {
-			$data[$i] = [];
+			$rowData = [];
 			if ($areAllColumnsSelected) {
 				foreach ($row as $field => $value) {
-					self::addSelectRowData($field, $value, $payload->fields, $data[$i]);
+					self::addSelectRowData($field, $value, $payload->fields, $rowData, $payload->mySQLTool);
 				}
 			} else {
+				self::unifyFieldNames($payload->fields);
 				foreach ($payload->fields as $field) {
-					[$type, $value] = static::COLUMNS_FIELD_MAP[$field] ?? ['field', $field];
-					$data[$i][$field] = match ($type) {
-						'field' => $row[$value],
+					[$type, $value] = static::COLUMNS_FIELD_MAP[$field] ?? ['field', strtolower($field)];
+					$rowData[$field] = match ($type) {
+						'field' => $row[$value] ?? self::getFieldValue($field, $row, $table),
 						'static' => $value,
 						// default => $row[$field] ?? null,
 					};
 				}
 			}
-			++$i;
+			$data[] = $rowData;
 		}
-		$result = $payload->getTaskResult();
-		return $result->data($data);
+
+		return $data;
 	}
 
+	/**
+	 * @param string $field
+	 * @param array<string,string> $row
+	 * @param string $table
+	 * @return mixed
+	 */
+	protected static function getFieldValue(string $field, array $row, ?string $table = null): mixed {
+		if ($field === 'TABLE_NAME') {
+			return $table ?? ($row['Table'] ?? null);
+		}
+		return static::DEFAULT_FIELD_VALUES[$field] ?? null;
+	}
 
 	/**
 	 * @param Client $manticoreClient
@@ -338,7 +467,7 @@ final class Handler extends BaseHandler {
 			'/COALESCE\(([a-z@][a-z0-9_@]*),\s*\'\'\)\s*(<>|=[^>])\s*\'\'|'
 				. 'CONTAINS\(([a-z@][a-z0-9_@]*), \'NEAR\(\((\w+), (\w+)\), (\d+)\)\'\)/ius',
 			function ($matches) {
-				if (isset($matches[1])) {
+				if (!isset($matches[6])) {
 					return $matches[1] . ' ' . $matches[2] . ' \'\'';
 				}
 
@@ -351,7 +480,6 @@ final class Handler extends BaseHandler {
 		if (!$selectQuery) {
 			throw new Exception('Failed to parse coalesce or contains from the query');
 		}
-
 		$query = "DESC {$table}";
 		/** @var array<array{data:array<array<string,string>>}> */
 		$descResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
@@ -407,12 +535,12 @@ final class Handler extends BaseHandler {
 			};
 		}
 
-		/** @var array{0:array{columns:array<array<string,mixed>>,data:array<array<string,string>>}} */
-		$result = $manticoreClient->sendRequest($selectQuery)->getResult();
+		$response = $manticoreClient->sendRequest($selectQuery);
 		if ($isLikeOp) {
-			$result = static::filterRegexFieldsFromResult($result);
+			$filterFn = static::getFilterRegexFieldFn();
+			$response->apply($filterFn);
 		}
-		return TaskResult::raw($result);
+		return TaskResult::fromResponse($response);
 	}
 
 
@@ -434,19 +562,17 @@ final class Handler extends BaseHandler {
 		if (!$query) {
 			throw new Exception('Failed to fix query');
 		}
-		/** @var array<array{data:array<array<string,string>>}> */
-		$selectResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
-		return TaskResult::raw($selectResult);
+		$selectResponse = $manticoreClient->sendRequest($query, $payload->path);
+		return TaskResult::fromResponse($selectResponse);
 	}
 
 	/**
 	 * Remove table alias syntax from query if exists
 	 *
 	 * @param Payload $payload
-	 * @param string $query
 	 * @return void
 	 */
-	protected static function checkQueryForAliasSyntax(Payload &$payload, string &$query): void {
+	protected static function removeAliasSyntaxIfExists(Payload $payload): void {
 		$alias = false;
 		if ($payload->fields) {
 			$i = 0;
@@ -455,7 +581,7 @@ final class Handler extends BaseHandler {
 				if (str_ends_with($field, '.*')) {
 					$alias = str_replace('.*', '', $field);
 					$payload->fields[$i] = '*';
-					$query = str_replace("$field", '*', $query);
+					$payload->originalQuery = str_replace("$field", '*', $payload->originalQuery);
 				}
 				$i++;
 			} while ($alias === false && $i < sizeof($payload->fields));
@@ -463,7 +589,11 @@ final class Handler extends BaseHandler {
 		if ($alias === false) {
 			return;
 		}
-		$query = preg_replace("/{$payload->table}\s+$alias\s+/i", $payload->table . ' ', $query);
+		$payload->originalQuery = (string)preg_replace(
+			"/{$payload->originalTable}\s+$alias\s+/is",
+			$payload->originalTable . ' ',
+			$payload->originalQuery
+		);
 	}
 
 	/**
@@ -472,6 +602,7 @@ final class Handler extends BaseHandler {
 	 * @return TaskResult
 	 */
 	protected static function handleSelectDatabasePrefixed(Client $manticoreClient, Payload $payload): TaskResult {
+		self::removeAliasSyntaxIfExists($payload);
 		$query = str_ireplace(
 			['`Manticore`.', 'Manticore.'],
 			'',
@@ -580,8 +711,10 @@ final class Handler extends BaseHandler {
 			$query = preg_replace($patterns, $replacements, $query) ?? $query;
 		}
 
+		$queryResponse = $manticoreClient->sendRequest($query, $payload->path);
 		/** @var array{error?:string} $queryResult */
-		$queryResult = $manticoreClient->sendRequest($query, $payload->path)->getResult();
+		$queryResult = $queryResponse->getResult();
+
 		if (isset($queryResult['error'])) {
 			$payload->originalQuery = $query;
 			$errors = [
@@ -598,7 +731,7 @@ final class Handler extends BaseHandler {
 			}
 		}
 
-		return TaskResult::raw($queryResult);
+		return TaskResult::fromResponse($queryResponse);
 	}
 
 	/**
@@ -642,28 +775,37 @@ final class Handler extends BaseHandler {
 	}
 
 	/**
-	 * @param array{0:array{columns:array<array<string,mixed>>,data:array<array<string,string>>}} $result
-	 * @return array{0:array{columns:array<array<string,mixed>>,data:array<array<string,string>>}}
+	 * Get filter regex fields method to exclude regex fields from result
+	 * @return callable
 	 */
-	protected static function filterRegexFieldsFromResult(array $result): array {
-		$result[0]['columns'] = array_filter(
-			$result[0]['columns'],
-			fn($v) => !str_ends_with(array_key_first($v) ?? '', '__regex')
-		);
-		$result[0]['data'] = array_map(
-			function ($row) {
-				foreach (array_keys($row) as $key) {
-					if (!str_ends_with($key, '__regex')) {
-						continue;
+	protected static function getFilterRegexFieldFn(): callable {
+		/**
+		 * @param array{0:array{columns:array<array<string,mixed>>,data:array<array<string,string>>}} $data
+		 * @return array{0:array{columns:array<array<string,mixed>>,data:array<array<string,string>>}}
+		 */
+		return function (array $data): array {
+			$data[0]['columns'] = array_filter(
+				$data[0]['columns'],
+				fn($v) => !str_ends_with(array_key_first($v) ?? '', '__regex')
+			);
+
+			$data[0]['data'] = array_map(
+				function ($row) {
+					foreach (array_keys($row) as $key) {
+						/** @var string $key */
+						if (!str_ends_with($key, '__regex')) {
+							continue;
+						}
+
+						unset($row[$key]);
 					}
 
-					unset($row[$key]);
-				}
+					return $row;
+				},
+				$data[0]['data']
+			);
 
-				return $row;
-			}, $result[0]['data']
-		);
-
-		return $result;
+			return $data;
+		};
 	}
 }

@@ -227,11 +227,12 @@ class TableProcessor extends AbstractProcessor
                 case 'MIN_ROWS':
                 case 'PACK_KEYS':
                 case 'CHECKSUM':
-                case 'COMMENT':
                 case 'CONNECTION':
                 case 'AUTO_INCREMENT':
                 case 'AVG_ROW_LENGTH':
                 case 'ENGINE':
+                case 'EXCEPTIONS':
+                case 'WORDFORMS':
                 case 'TYPE':
                 case 'STATS_AUTO_RECALC':
                 case 'STATS_PERSISTENT':

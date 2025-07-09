@@ -12,6 +12,7 @@
 namespace Manticoresearch\Buddy\CoreTest\Trait;
 
 use Exception;
+use Manticoresearch\Buddy\Core\Tool\Buddy;
 
 trait TestFunctionalTrait {
 
@@ -317,13 +318,13 @@ trait TestFunctionalTrait {
 
 		/** @var array<int,array{error:string,data:array<int,array<string,string>>,total?:string,columns?:string}> $result */
 		$result = match ($path) {
-			'cli_json', 'sql', 'sql?mode=raw' => (array)json_decode(implode(PHP_EOL, $output), true),
+			'cli_json', 'sql', 'sql?mode=raw' => (array)simdjson_decode(implode(PHP_EOL, $output), true),
 			'cli' => [
 				['columns' => implode(PHP_EOL, $output), 'data' => [], 'error' => ''],
 			],
 			// assuming Elastic-like endpoint is passed
 			default => [
-				['data' => [(array)json_decode($output[0] ?? '{}', true)], 'error' => ''],
+				['data' => [(array)simdjson_decode($output[0] ?? '{}', true)], 'error' => ''],
 			],
 		};
 		print_r($output);
@@ -349,7 +350,7 @@ trait TestFunctionalTrait {
 		$request = [
 			'type' => 'unknown json request',
 			'error' => $error,
-			'version' => 2,
+			'version' => Buddy::PROTOCOL_VERSION,
 			'message' => [
 				'path_query' => '/sql?mode=raw',
 				'body' => $query,
@@ -360,7 +361,7 @@ trait TestFunctionalTrait {
 		$redirect = $redirectOutput ? '2>&1' : '';
 		exec("curl -s 127.0.0.1:$port -H 'Content-type: application/json' -d @$payloadFile $redirect", $output);
 		/** @var array{version:int,type:string,message:array<int,array{columns:array<string>,data:array<int,array<string,string>>}>} $result */
-		$result = (array)json_decode($output[0] ?? '{}', true);
+		$result = (array)simdjson_decode($output[0] ?? '{}', true);
 		return $result;
 	}
 

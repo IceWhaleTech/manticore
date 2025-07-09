@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
-  Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+  Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License version 2 or any later
@@ -41,10 +41,9 @@ final class Handler extends BaseHandlerWithClient {
 				throw new RuntimeException('Failed to prepare query');
 			}
 
-			$queryResult = $manticoreClient
-				->sendRequest($query, $payload->path)
-				->getResult();
-			return TaskResult::raw($queryResult);
+			$queryResponse = $manticoreClient
+				->sendRequest($query, $payload->path);
+			return TaskResult::fromResponse($queryResponse);
 		};
 
 		return Task::create(

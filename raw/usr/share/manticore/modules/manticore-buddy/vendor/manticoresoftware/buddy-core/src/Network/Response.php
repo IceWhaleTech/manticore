@@ -14,7 +14,9 @@ namespace Manticoresearch\Buddy\Core\Network;
 use Manticoresearch\Buddy\Core\Error\GenericError;
 use Manticoresearch\Buddy\Core\ManticoreSearch\RequestFormat;
 use Manticoresearch\Buddy\Core\Plugin\TableFormatter;
+use Manticoresearch\Buddy\Core\Tool\Buddy;
 
+/** @package Manticoresearch\Buddy\Core\Network */
 final class Response {
   /**
 	 * Initialize response with string message to be returned (json encoded) and bool flag setting if response has error
@@ -59,7 +61,21 @@ final class Response {
    * @return static
    */
 	public static function fromMessage(mixed $message, RequestFormat $format = RequestFormat::JSON): static {
-		return static::fromMessageAndError($message, null, $format);
+		return static::fromMessageAndError($message, [], null, $format);
+	}
+
+	/**
+	 * @param mixed $message
+	 * @param array<string,mixed> $meta
+	 * @param RequestFormat $format
+	 * @return static
+	 */
+	public static function fromMessageAndMeta(
+		mixed $message = [],
+		array $meta = [],
+		RequestFormat $format = RequestFormat::JSON
+	) {
+		return static::fromMessageAndError($message, $meta, null, $format);
 	}
 
   /**
@@ -70,9 +86,10 @@ final class Response {
    * @return static
    */
 	public static function fromError(GenericError $error, RequestFormat $format = RequestFormat::JSON): static {
-		return static::fromMessageAndError(
-			['error' => $error->getResponseError()], $error, $format
-		);
+		$errorMessage = $error->hasResponseErrorBody()
+			? $error->getResponseErrorBody()
+			: ['error' => $error->getResponseError()];
+		return static::fromMessageAndError($errorMessage, [], $error, $format);
 	}
 
   /**
@@ -86,12 +103,14 @@ final class Response {
   /**
 	 * Create response from the message and include error to it also
    * @param mixed $message
+	 * @param array<string,mixed> $meta
    * @param ?GenericError $error
    * @param RequestFormat $format
    * @return static
    */
 	public static function fromMessageAndError(
 		mixed $message = [],
+		array $meta = [],
 		?GenericError $error = null,
 		RequestFormat $format = RequestFormat::JSON
 	): static {
@@ -100,19 +119,30 @@ final class Response {
 			if ($format === RequestFormat::JSON) {
 				$message = [];
 			}
-			$message['error'] = $responseError;
+			if ($error->hasResponseErrorBody()) {
+				$message = $error->getResponseErrorBody() + $message;
+			} else {
+				$message['error'] = $responseError;
+			}
 		}
-		$payload = [
-			'version' => 2,
-			'type' => "{$format->value} response",
-			'message' => $message,
-			'error_code' => $error?->getResponseErrorCode() ?? 200,
-		];
+		$json = '{'
+			. '"version":' . Buddy::PROTOCOL_VERSION . ','
+			. '"type":"' . $format->value . ' response",'
+			. '"message":%message%,'
+			. '"meta":' . ($meta ? json_encode($meta) : 'null') . ','
+			. '"error_code":' . ($error?->getResponseErrorCode() ?? 200)
+			. '}';
+		if ($message instanceof Struct) {
+			$json = str_replace('%message%', $message->toJson(), $json);
+		} else {
+			$json = str_replace(
+				'%message%',
+				json_encode($message, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_IGNORE),
+				$json
+			);
+		}
 
-		return new static(
-			json_encode($payload, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_IGNORE),
-			self::checkForError($message)
-		);
+		return new static($json, self::checkForError($message));
 	}
 
   /**

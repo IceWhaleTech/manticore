@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
-  Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+  Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License version 2 or any later
@@ -43,19 +43,19 @@ final class Payload extends BasePayload {
 	 * @return bool
 	 */
 	public static function hasMatch(Request $request): bool {
-		$hasError = str_contains($request->error, "unexpected \$undefined near '.*")
+		$hasError = stripos($request->error, 'near') !== false && (
+			str_contains($request->error, "unexpected \$undefined near '.*")
 			|| str_contains($request->error, "unexpected identifier, expecting SET near 't ")
 			|| (
 				str_contains($request->error, "expecting \$end near '")
 				&& str_contains($request->error, " t'")
-			);
-
-		$hasMatch = str_contains($request->payload, ' t.')
-			|| str_ends_with($request->payload, ' t');
-		if ($hasError && $hasMatch) {
-			return true;
+			)
+		);
+		if (!$hasError) {
+			return false;
 		}
 
-		return false;
+		return stripos($request->payload, ' t.') !== false
+			|| str_ends_with($request->payload, ' t');
 	}
 }
