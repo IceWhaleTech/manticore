@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
- Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+ Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2 or any later
@@ -20,6 +20,8 @@ enum Datatype: string {
 	case Bigint = 'bigint';
 	case Text = 'text';
 	case String = 'string';
+	case Indexedjson = "json secondary_index='1'";
+	case Indexedstring = 'string attribute indexed';
 	case Timestamp = 'timestamp';
 	case Null = 'null';
 }

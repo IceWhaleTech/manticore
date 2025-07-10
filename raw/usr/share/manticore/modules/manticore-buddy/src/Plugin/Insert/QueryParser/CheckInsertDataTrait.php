@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
- Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+ Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2 or any later
@@ -74,6 +74,7 @@ trait CheckInsertDataTrait {
 	protected static function checkPredefinedColTypes(array &$types, array $cols): void {
 		$predefinedTypes = [
 			'@timestamp' => Datatype::Timestamp,
+			'id' => Datatype::Bigint,
 		];
 		foreach (array_keys($types) as $i) {
 			if (!isset($cols[$i], $predefinedTypes[$cols[$i]])) {
@@ -101,10 +102,9 @@ trait CheckInsertDataTrait {
 		string &$error
 	): void {
 		$typeBundles = [
-			[Datatype::Json, Datatype::Null],
-			[Datatype::Multi64, Datatype::Multi, Datatype::Null],
+			[Datatype::Indexedjson, Datatype::Json, Datatype::Multi64, Datatype::Multi, Datatype::Null],
 			[Datatype::Float, Datatype::Bigint, Datatype::Int, Datatype::Null],
-			[Datatype::Text, Datatype::String, Datatype::Null],
+			[Datatype::Text, Datatype::Indexedstring, Datatype::String, Datatype::Null],
 			[Datatype::Text, Datatype::Timestamp, Datatype::Null],
 		];
 		$isNewErrorCol = true;
@@ -181,6 +181,18 @@ trait CheckInsertDataTrait {
 		}
 
 		return false;
+	}
+
+	/**
+	 * Detecting if type is timestamp in one of string formats we support
+	 *
+	 * @param string $val
+	 * @return bool
+	 */
+	protected static function isManticoreDate(string $val): bool {
+		// Detecting only the date formats that we currently support in daemon
+		$dateRegex = '/^\d{4}\-\d{2}\-\d{2}(T\d{2}$|((T|\s)\d{2}:\d{2}(:\d{2}((\.\d{3})?(\+\d{2}:\d{2}Z?)?)?)?)?$)/';
+		return preg_match($dateRegex, $val) ? true : false;
 	}
 
 	/**

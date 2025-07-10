@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
- Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+ Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2 or any later
@@ -100,6 +100,7 @@ class SQLInsertParser extends BaseParser implements InsertQueryParserInterface {
 				}
 				break;
 		}
+
 		return false;
 	}
 
@@ -232,36 +233,58 @@ class SQLInsertParser extends BaseParser implements InsertQueryParserInterface {
 	}
 
 	/**
+	 * Helper function to detect Mva datatypes
+	 *
+	 * @param string $val
+	 * @return Datatype
+	 */
+	protected static function detectMvaTypes(string $val): Datatype {
+		$subVals = explode(',', substr($val, 1, -1));
+		array_walk(
+			$subVals,
+			function (&$v) {
+				$v = trim($v);
+			}
+		);
+		$returnType = Datatype::Multi;
+		foreach ($subVals as $v) {
+			$subValType = self::detectValType($v);
+			if ($returnType !== Datatype::Multi64 && $subValType === Datatype::Bigint) {
+				$returnType = Datatype::Multi64;
+			} elseif ($subValType === Datatype::Float) {
+				return Datatype::Json;
+			}
+		}
+
+		return $returnType;
+	}
+
+	/**
+	 * @param string $val
+	 * @return bool
+	 */
+	protected static function isValidJSONVal(string $val): bool {
+		/** @phpstan-ignore-next-line */
+		return json_validate(substr($val, 1, -1));
+	}
+
+	/**
 	 * @param string $val
 	 * @return Datatype
 	 */
 	protected static function detectValType(string $val): Datatype {
-		// numeric types
-		if (is_numeric($val)) {
-			return self::detectNumericValType($val);
-		}
-		// json type
-		if (substr($val, 1, 1) === '{' && substr($val, -2, 1) === '}') {
-			return Datatype::Json;
-		}
-		// mva types
-		if (substr($val, 0, 1) === '(' && substr($val, -1) === ')') {
-			$subVals = explode(',', substr($val, 1, -1));
-			array_walk(
-				$subVals,
-				function (&$v) {
-					$v = trim($v);
-				}
-			);
-			foreach ($subVals as $v) {
-				if (self::detectValType($v) === Datatype::Bigint) {
-					return Datatype::Multi64;
-				}
-			}
-			return Datatype::Multi;
-		}
-
-		return (self::isManticoreString($val) === true) ? Datatype::String : Datatype::Text;
+		return match (true) {
+			// numeric types
+			is_numeric($val) => self::detectNumericValType($val),
+			// json type
+			((substr($val, 1, 1) === '{' && substr($val, -2, 1) === '}') ||
+			(substr($val, 1, 1) === '[' && substr($val, -2, 1) === ']'))
+			&& self::isValidJSONVal($val) => Datatype::Json,
+			// mva types
+			(substr($val, 0, 1) === '(' && substr($val, -1) === ')') => self::detectMvaTypes($val),
+			self::isManticoreString($val) => Datatype::String,
+			self::isManticoreDate($val) => Datatype::Timestamp,
+			default => Datatype::Text,
+		};
 	}
-
 }

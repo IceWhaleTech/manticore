@@ -17,12 +17,19 @@ use Ds\Vector;
 use Exception;
 use Generator;
 use Manticoresearch\Buddy\Core\Error\ManticoreSearchClientError;
+use Manticoresearch\Buddy\Core\Network\Struct;
+use Manticoresearch\Buddy\Core\Tool\Arrays;
 use Manticoresearch\Buddy\Core\Tool\Buddy;
 use RuntimeException;
 use Swoole\ConnectionPool;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client as HttpClient;
+use Swoole\Coroutine\WaitGroup;
+use Swoole\Lock;
 
+/**
+ * @phpstan-type Variation array{original:string,keywords:array<string>}
+ */
 class Client {
 	const CONTENT_TYPE_HEADER = "Content-Type: application/x-www-form-urlencoded\n";
 	const URL_PREFIX = 'http://';
@@ -40,6 +47,9 @@ class Client {
 	/** @var int $port */
 	protected int $port;
 
+	/** @var ?string $authToken */
+	protected ?string $authToken = null;
+
 	/** @var string $buddyVersion */
 	protected string $buddyVersion;
 
@@ -49,40 +59,34 @@ class Client {
 	/** @var ConnectionPool $connectionPool */
 	protected ConnectionPool $connectionPool;
 
+	/** @var Map<string,Client> */
+	protected Map $clientMap;
+
 	/** @var bool $forceSync */
 	protected bool $forceSync = false;
 
 	/**
 	 * Initialize the Client that will use provided
-	 * @param ?Response $responseBuilder
 	 * @param ?string $url
+	 * @param ?string $authToken
 	 * @return void
 	 */
-	public function __construct(
-		protected ?Response $responseBuilder = null,
-		?string $url = null
-	) {
+	public function __construct(?string $url = null, ?string $authToken = null) {
 		// If no url passed, set default one
 		if (!$url) {
 			$url = static::DEFAULT_URL;
 		}
 		$this->setServerUrl($url);
+		$this->setAuthToken($authToken);
 		$this->connectionPool = new ConnectionPool(
 			function () {
-				return new HttpClient($this->host, $this->port);
+				$client = new HttpClient($this->host, $this->port);
+				$client->set(['timeout' => -1]);
+				return $client;
 			}
 		);
 		$this->buddyVersion = Buddy::getVersion();
-	}
-
-	/**
-	 * Set Response Builder
-	 * @param Response $responseBuilder
-	 * @return static
-	 */
-	public function setResponseBuilder(Response $responseBuilder): static {
-		$this->responseBuilder = $responseBuilder;
-		return $this;
+		$this->clientMap = new Map;
 	}
 
 	/**
@@ -100,21 +104,37 @@ class Client {
 	}
 
 	/**
+	 * @param ?string $authToken
+	 * @return static
+	 */
+	public function setAuthToken(?string $authToken): static {
+		$this->authToken = $authToken;
+		return $this;
+	}
+
+	/**
+	 * Get current server url
+	 * @return string
+	 */
+	public function getServerUrl(): string {
+		return static::URL_PREFIX . $this->host . ':' . $this->port;
+	}
+
+	/**
 	 * Send the request where request represents the SQL query to be send
 	 * @param string $request
 	 * @param ?string $path
 	 * @param bool $disableAgentHeader
 	 * @return Response
 	 */
+	// @phpcs:ignore SlevomatCodingStandard.Complexity.Cognitive.ComplexityTooHigh
 	public function sendRequest(
 		string $request,
 		?string $path = null,
-		bool $disableAgentHeader = false
+		bool $disableAgentHeader = false,
+		bool $disableShowMeta = false,
 	): Response {
 		$t = microtime(true);
-		if (!isset($this->responseBuilder)) {
-			throw new RuntimeException("'responseBuilder' property of ManticoreHTTPClient class is not instantiated");
-		}
 		if ($request === '') {
 			throw new ManticoreSearchClientError('Empty request passed');
 		}
@@ -128,22 +148,126 @@ class Client {
 		} else {
 			$contentTypeHeader = 'application/x-www-form-urlencoded';
 		}
+		$showMeta = false;
 		// We urlencode all the requests to the /sql endpoint
-		if (str_starts_with($path, 'sql')) {
-			$request = 'query=' . urlencode($request);
+		if (str_starts_with($path, 'sql') && !$disableAgentHeader) {
+			// Disabling show meta is a temporary workaround to be able to use 'sql' instead of 'sql?mode=raw'
+			// for getting correct values of JSON nested fields until that's fixed in daemon
+			$showMeta = !$disableShowMeta && stripos(trim($request), 'SELECT') === 0;
+			if ($showMeta) {
+				$request .= ';SHOW META';
+			}
+			$request = 'query=' . rawurlencode($request);
 		}
 		$userAgentHeader = $disableAgentHeader ? '' : "Manticore Buddy/{$this->buddyVersion}";
 		$headers = [
 			'Content-Type' => $contentTypeHeader,
 			'User-Agent' => $userAgentHeader,
 		];
+		// Add authorization header if we have token
+		if (isset($this->authToken)) {
+			$headers['Authorization'] = "Bearer {$this->authToken}";
+		}
 		$isAsync = Coroutine::getCid() > 0;
 		$method = !$this->forceSync && $isAsync ? 'runAsyncRequest' : 'runSyncRequest';
-		$this->response = $this->$method($path, $request, $headers);
-		$result = $this->responseBuilder->fromBody($this->response);
+		$response = $this->$method($path, $request, $headers);
+
+		// TODO: rethink and make it better without double json_encode
+		$result = Response::fromBody($response);
+		if ($showMeta) {
+			$struct = $result->getResult();
+			$array = $struct->toArray();
+			// TODO: Not sure what reason, but in sync request we have only one response
+			// But this is should not be blocker for meta, we just will not have it
+			if (sizeof($array) > 1) {
+				/** @var array{data?:array<array{Variable_name:string,Value:string}>} */
+				$metaRow = array_pop($array);
+				$response = Struct::fromData($array, $struct->getBigIntFields())->toJson();
+				$result = Response::fromBody($response);
+			}
+			$metaVars = $metaRow['data'] ?? [];
+			$meta = [];
+			foreach ($metaVars as ['Variable_name' => $name, 'Value' => $value]) {
+				$meta[$name] = $value;
+			}
+			$result->setMeta($meta);
+		}
+
+		$this->response = $response;
 		$time = (int)((microtime(true) - $t) * 1000000);
-		Buddy::debugv("[{$time}µs] manticore request: $request");
+		Buddy::debugvv("[{$time}µs] manticore request: $request");
 		return $result;
+	}
+
+	/**
+	 * Send multiple requests with async and get all responses in single run
+	 * @param array<array{url:string,request:string,path?:string,disableAgentHeader?:bool}> $requests
+	 * @return array<Response>
+	 */
+	public function sendMultiRequest(array $requests): array {
+		if (sizeof($requests) === 1) {
+			$request = array_pop($requests);
+			$response = $this->sendRequestToUrl(...$request);
+			return [$response];
+		}
+
+		$wg = new WaitGroup();
+		$responses = [];
+		$mutex = new Lock();
+
+		foreach ($requests as $request) {
+			$wg->add();
+			Coroutine::create(
+				function () use ($wg, &$responses, $mutex, $request) {
+					try {
+						$response = $this->sendRequestToUrl(...$request);
+						$mutex->lock();
+						$responses[] = $response;
+						$mutex->unlock();
+					} finally {
+						$wg->done();
+					}
+				}
+			);
+		}
+
+		$wg->wait();
+		return $responses;
+	}
+
+	/**
+	 * Helper function that let us to send request to the specified url and setit back to original
+	 * @param string $url
+	 * @param string $request
+	 * @param ?string $path
+	 * @param bool $disableAgentHeader
+	 * @return Response
+	 */
+	public function sendRequestToUrl(
+		string $url,
+		string $request,
+		?string $path = null,
+		bool $disableAgentHeader = false
+	): Response {
+		$client = $this->getClientForUrl($url);
+		return $client->sendRequest($request, $path, $disableAgentHeader);
+	}
+
+	/**
+	 * @param string $url
+	 * @return Client
+	 */
+	protected function getClientForUrl(string $url): Client {
+		if (!$url) {
+			return $this;
+		}
+
+		if (!isset($this->clientMap[$url])) {
+			$this->clientMap[$url] = new Client($url);
+		}
+
+		/** @var Client */
+		return $this->clientMap[$url];
 	}
 
 	/**
@@ -164,15 +288,24 @@ class Client {
 	 * @return string
 	 */
 	protected function runAsyncRequest(string $path, string $request, array $headers): string {
+		$try = 0;
+		request: $client = $this->connectionPool->get();
 		/** @var HttpClient $client */
-		$client = $this->connectionPool->get();
 		$headers['Connection'] = 'keep-alive';
-		$client->set(['timeout' => -1]);
+		$client->setMethod('POST');
 		$client->setHeaders($headers);
-		$client->post("/$path", $request);
+		$client->setData($request);
+		$client->execute("/$path");
 		if ($client->errCode) {
-			$error = "Error while async request: {$client->errCode}: {$client->errMsg}";
-			throw new ManticoreSearchClientError($error);
+			/** @phpstan-ignore-next-line */
+			if ($client->errCode !== 104 || $try >= 3) {
+				$error = "Error while async request: {$client->errCode}: {$client->errMsg}";
+				throw new ManticoreSearchClientError($error);
+			}
+
+			Buddy::debug('Client: connection reset by peer, repeat: ' . (++$try));
+			$client->close();
+			goto request;
 		}
 		$result = $client->body;
 		$this->connectionPool->put($client);
@@ -244,9 +377,8 @@ class Client {
 		/** @var array<array{data:array<array{Type:string,Index:string}>}> $res */
 		$res = $this->sendRequest('SHOW TABLES')->getResult();
 
-		// TODO: still not changed to Table in manticore?
 		$typesMap = array_flip($types);
-		foreach ($res[0]['data'] as ['Type' => $type, 'Index' => $table]) {
+		foreach ($res[0]['data'] as ['Type' => $type, 'Table' => $table]) {
 			if ($typesMap && !isset($typesMap[$type])) {
 				continue;
 			}
@@ -296,9 +428,66 @@ class Client {
 	 * @return bool
 	 */
 	public function hasTable(string $table): bool {
-		/** @var array<array{total:int}>}> $res */
-		$res = $this->sendRequest("SHOW TABLES LIKE '$table'")->getResult();
-		return !!$res[0]['total'];
+		/** @var array{error:string}> $res */
+		$res = $this->sendRequest("DESC $table")->getResult();
+		return !$res['error'];
+	}
+
+	/**
+	 * Get all shards for current distributed table from the schema
+	 * @param string $table
+	 * @return array<array{name:string,url:string}>
+	 * @throws RuntimeException
+	 */
+	public function getTableShards(string $table): array {
+		[$locals, $agents] = $this->parseTableShards($table);
+
+		$shards = [];
+		// Add locals first
+		foreach ($locals as $t) {
+			$shards[] = [
+				'name' => $t,
+				'url' => '',
+			];
+		}
+		// Add agents after
+		foreach ($agents as $agent) {
+			$ex = explode('|', $agent);
+			$host = strtok($ex[0], ':');
+			$port = (int)strtok(':');
+			$t = strtok(':');
+			$shards[] = [
+				'name' => (string)$t,
+				'url' => "$host:$port",
+			];
+		}
+		$map[$table] = $shards;
+		return $shards;
+	}
+
+	/**
+	 * Helper to parse shards and return local and remote agents for current table
+	 * @param string $table
+	 * @return array{0:array<string>,1:array<string>}
+	 */
+	protected function parseTableShards($table): array {
+		/** @var array{0:array{data:array<array{"Create Table":string}>}} */
+		$res = $this->sendRequest("SHOW CREATE TABLE $table OPTION force=1")->getResult();
+		$tableSchema = $res[0]['data'][0]['Create Table'] ?? '';
+		if (!$tableSchema) {
+			throw new RuntimeException("There is no such table: {$table}");
+		}
+		if (!str_contains($tableSchema, "type='distributed'")) {
+			throw new RuntimeException('The table is not distributed');
+		}
+
+		if (!preg_match_all("/local='(?P<local>[^']+)'|agent='(?P<agent>[^']+)'/ius", $tableSchema, $m)) {
+			throw new RuntimeException('Failed to match tables from the schema');
+		}
+		return [
+			array_filter($m['local']),
+			array_filter($m['agent']),
+		];
 	}
 
 	/**
@@ -319,7 +508,7 @@ class Client {
 	protected function fetchSettings(): Settings {
 		$resp = $this->sendRequest('SHOW SETTINGS');
 		/** @var array{0:array{columns:array<mixed>,data:array{Setting_name:string,Value:string}}} */
-		$data = (array)json_decode($resp->getBody(), true);
+		$data = (array)simdjson_decode($resp->getBody(), true);
 		$settings = new Vector();
 		foreach ($data[0]['data'] as ['Setting_name' => $key, 'Value' => $value]) {
 			// If the key is plugin_dir check env first and after choose
@@ -347,7 +536,7 @@ class Client {
 		// Gather variables also
 		$resp = $this->sendRequest('SHOW VARIABLES');
 		/** @var array{0:array{columns:array<mixed>,data:array{Setting_name:string,Value:string}}} */
-		$data = (array)json_decode($resp->getBody(), true);
+		$data = (array)simdjson_decode($resp->getBody(), true);
 		foreach ($data[0]['data'] as ['Variable_name' => $key, 'Value' => $value]) {
 			$settings->push(
 				new Map(
@@ -363,50 +552,175 @@ class Client {
 		return Settings::fromVector($settings);
 	}
 
-		/**
-	 * Helper to build combinations of words with typo and fuzzy correction to next combine in searches
-	 * @param string $query The query to be tokenized
-	 * @param string $table The table to be used in the suggest function
-	 * @param int $distance The maximum distance between the query word and the suggestion
-	 * @param int $limit The maximum number of suggestions for each tokenized word
-	 * @return array<array<string>> The list of variations for each word presented in query phrase
-	 * @throws RuntimeException
-	 * @throws ManticoreSearchClientError
+	/**
+	 * Fetches fuzzy variations for a given query.
+	 *
+	 * @param string $query The search query to find variations for
+	 * @param string $table The table to search in
+	 * @param int $distance Maximum edit distance for suggestions
+	 * @param int $limit Maximum number of suggestions per word
+	 * @return array{0: array<Variation>, 1: array<string, float>} Words and score map
 	 */
-	public function fetchFuzzyVariations(string $query, string $table, int $distance = 2, int $limit = 3): array {
+	public function fetchFuzzyVariations(
+		string $query,
+		string $table,
+		int $distance = 2,
+		int $limit = 3
+	): array {
+		// First, escape the given query
+		$query = addcslashes($query, '*%?\'');
 		// 1. Tokenize the query first with the keywords function
 		$q = "CALL KEYWORDS('{$query}', '{$table}')";
 		/** @var array<array{data:array<array{normalized:string,tokenized:string}>}> $keywordsResult */
 		$keywordsResult = $this->sendRequest($q)->getResult();
 		$normalized = array_column($keywordsResult[0]['data'] ?? [], 'normalized');
-		$words = [];
-		// 2. For each tokenized word, we get the suggestions from the suggest function
-		foreach ($normalized as $word) {
-			/** @var array<array{data:array<array{suggest:string,distance:int,docs:int}>}> $suggestResult */
-			$suggestResult = $this
-				->sendRequest(
-					"CALL SUGGEST('{$word}', '{$table}', {$limit} as limit)"
-				)
-				->getResult();
-			/** @var array{suggest:string,distance:int,docs:int} $suggestion */
-			$suggestions = $suggestResult[0]['data'] ?? [];
-			$choices = [];
-			// When we have not suggestions, we use original form of word
-			if (!$suggestions) {
-				$choices = [$word];
-			}
-			foreach ($suggestions as $suggestion) {
-				// If the distance is out of allowed, we use original word form
-				if ($suggestion['distance'] > $distance) {
-					$choices[] = $word;
-					break;
-				}
 
-				$choices[] = $suggestion['suggest'];
-			}
-			$words[] = $choices;
+		/** @var array<Variation> $words */
+		$words = [];
+		/** @var array<string,int> $distanceMap */
+		$distanceMap = [];
+		/** @var array<string,int> $docMap */
+		$docMap = [];
+
+		// 2. For each tokenized word, we get the suggestions from the suggest function
+		foreach ($normalized as $i => $word) {
+			// Split into multiple lines for better readability
+			$this->processSuggestion(
+				$word,
+				$table,
+				$limit,
+				$distance,
+				$i,
+				$normalized,
+				$words,
+				$distanceMap,
+				$docMap,
+			);
 		}
-		return $words;
+
+		// 3. Normalize the distance and docs values
+		/** @var array<string,float> $docMapNormalized */
+		$docMapNormalized = Arrays::normalizeValues($docMap);
+		/** @var array<string,float> $distanceMapNormalized */
+		$distanceMapNormalized = Arrays::normalizeValues($distanceMap);
+		// Discard the original values
+		unset($docMap, $distanceMap);
+
+		$scoreMap = $this->calculateScoreMap($docMapNormalized, $distanceMapNormalized);
+
+		return [$words, $scoreMap];
 	}
 
+	/**
+	 * Processes suggestions for a word and adds them to the words, distanceMap and docMap arrays.
+	 *
+	 * @param string $word The word to get suggestions for
+	 * @param string $table The table to search in
+	 * @param int $limit Maximum number of suggestions per word
+	 * @param int $distance Maximum edit distance for suggestions
+	 * @param int $i Current word index
+	 * @param array<string> $normalized Array of normalized words
+	 * @param array<Variation> $words Reference to words array to be populated
+	 * @param array<string,int> $distanceMap Reference to distance map to be populated
+	 * @param array<string,int> $docMap Reference to document map to be populated
+	 * @return void
+	 */
+	private function processSuggestion(
+		string $word,
+		string $table,
+		int $limit,
+		int $distance,
+		int $i,
+		array $normalized,
+		array &$words,
+		array &$distanceMap,
+		array &$docMap,
+	): void {
+		/**
+		 * @var array<array{
+		 *     data: array<array{
+		 *         suggest: string,
+		 *         distance: int,
+		 *         docs: int
+		 *     }>
+		 * }> $suggestResult
+		 */
+		$suggestResult = $this
+			->sendRequest(
+				"CALL SUGGEST('{$word}', '{$table}', {$limit} as limit, {$distance} as max_edits)"
+			)
+			->getResult();
+		$suggestions = $suggestResult[0]['data'] ?? [];
+		$choices = [];
+
+		foreach ($suggestions as $suggestion) {
+			$suggestWord = $suggestion['suggest'];
+			$choices[] = $suggestWord;
+			$distanceMap[$suggestWord] = $suggestion['distance'];
+			$docMap[$suggestWord] = $suggestion['docs'];
+		}
+
+		// Try to merge with next word if it exists
+		// Only do it when we have any choices
+		if ($choices && isset($normalized[$i + 1])) {
+			$nextWord = $normalized[$i + 1];
+			$combinedWord = $word . $nextWord;
+
+			/** @var array<array{data:array<array{suggest:string,distance:int,docs:int}>}> $combinedSuggestResult */
+			$combinedSuggestResult = $this
+				->sendRequest(
+					"CALL SUGGEST('{$combinedWord}', '{$table}', {$limit} as limit, {$distance} as max_edits)"
+				)
+				->getResult();
+
+			/** @var array{suggest:string,distance:int,docs:int} $suggestion */
+			$combinedSuggestions = $combinedSuggestResult[0]['data'] ?? [];
+
+			foreach ($combinedSuggestions as $suggestion) {
+				$combinedSuggest = $suggestion['suggest'];
+				$choices[] = $combinedSuggest;
+				// We add 1 here cuz we already merge with space, so the distance is the same
+				$distanceMap[$combinedSuggest] = $suggestion['distance'] + 1;
+				$docMap[$combinedSuggest] = $suggestion['docs'];
+			}
+		}
+
+		// Special case for empty suggestions
+		if (!$choices) {
+			$distanceMap[$word] = 999;
+			$docMap[$word] = 0;
+		}
+
+		$words[] = [
+			'original' => $word,
+			'keywords' => $choices,
+		];
+	}
+
+	/**
+	 * Calculates the score map based on normalized distance and document scores.
+	 *
+	 * @param array<string,float> $docMapNormalized Normalized document scores
+	 * @param array<string,float> $distanceMapNormalized Normalized distance scores
+	 * @return array<string,float> Score map with calculated scores
+	 */
+	private function calculateScoreMap(array $docMapNormalized, array $distanceMapNormalized): array {
+		// We are use minimum distance to avoid siutation when less docs affect relevance
+		$scoreFn = static function (float $distance, float $docs): float {
+			return (float)max($distance + 1, sqrt($docs)) / ($distance + 1);
+		};
+
+		/** @var array<string,float> $scoreMap */
+		$scoreMap = [];
+		foreach ($docMapNormalized as $word => $docScore) {
+			if (!isset($distanceMapNormalized[$word])) {
+				continue;
+			}
+
+			$distanceScore = $distanceMapNormalized[$word];
+			$scoreMap[$word] = $scoreFn($docScore, $distanceScore);
+		}
+
+		return $scoreMap;
+	}
 }

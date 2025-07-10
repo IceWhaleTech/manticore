@@ -5,9 +5,12 @@ namespace Manticoresearch\Buddy\Base\Plugin\Sharding;
 use Ds\Map;
 use Ds\Set;
 use Ds\Vector;
+use Exception;
+use Manticoresearch\Buddy\Core\Error\ManticoreSearchClientError;
 use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
 use RuntimeException;
 
+/** @package Manticoresearch\Buddy\Base\Plugin\Sharding */
 final class Table {
 	public readonly string $table;
 
@@ -24,7 +27,7 @@ final class Table {
 		protected readonly string $structure,
 		protected readonly string $extra
 	) {
-		$this->table = '_sharding_table';
+		$this->table = 'system.sharding_table';
 	}
 
 	/**
@@ -40,10 +43,10 @@ final class Table {
 				SELECT *
 				FROM {$this->table}
 				WHERE
-					cluster = '{$this->cluster->name}'
-						AND
-					table = '{$this->name}'
-			"
+				cluster = '{$this->cluster->name}'
+				AND
+				table = '{$this->name}'
+				"
 			)
 			->getResult();
 
@@ -68,9 +71,9 @@ final class Table {
 			$nodes->push(
 				new Map(
 					[
-					'node' => $row['node'],
-					'shards' => $shards,
-					'connections' => $connectedNodes,
+						'node' => $row['node'],
+						'shards' => $shards,
+						'connections' => $connectedNodes,
 					]
 				)
 			);
@@ -85,13 +88,13 @@ final class Table {
 	 */
 	public function getConnectedNodes(Set $shards): Set {
 		$query = "
-			SELECT node FROM {$this->table}
-			WHERE
-				cluster = '{$this->cluster->name}'
-					AND
-				table = '{$this->name}'
-					AND
-				shards in ({$shards->join(',')})
+		SELECT node FROM {$this->table}
+		WHERE
+		cluster = '{$this->cluster->name}'
+		AND
+		table = '{$this->name}'
+		AND
+		shards in ({$shards->join(',')})
 		";
 
 		$connections = new Set;
@@ -111,14 +114,14 @@ final class Table {
 	 */
 	public function getExternalNodeShards(Set $shards): Vector {
 		$query = "
-			SELECT node, shards FROM {$this->table}
-			WHERE
-				cluster = '{$this->cluster->name}'
-					AND
-				table = '{$this->name}'
-					AND
-				ANY(shards) not in ({$shards->join(',')})
-			ORDER BY id ASC
+		SELECT node, shards FROM {$this->table}
+		WHERE
+		cluster = '{$this->cluster->name}'
+		AND
+		table = '{$this->name}'
+		AND
+		ANY(shards) not in ({$shards->join(',')})
+		ORDER BY id ASC
 		";
 
 		$nodes = new Vector;
@@ -128,8 +131,8 @@ final class Table {
 			$nodes->push(
 				new Map(
 					[
-					'node' => $row['node'],
-					'shards' => static::parseShards($row['shards']),
+						'node' => $row['node'],
+						'shards' => static::parseShards($row['shards']),
 					]
 				)
 			);
@@ -174,10 +177,11 @@ final class Table {
 		/** @var Map<string,mixed> */
 		$result = new Map(
 			[
-			'status' => 'processing',
-			'result' => null,
-			'structure' => $this->structure,
-			'extra' => $this->extra,
+				'status' => 'processing',
+				'type' => 'create',
+				'result' => null,
+				'structure' => $this->structure,
+				'extra' => $this->extra,
 			]
 		);
 
@@ -189,7 +193,7 @@ final class Table {
 
 		$schema = $this->configureNodeShards($shardCount, $replicationFactor);
 		$reduceFn = function (Map $clusterMap, array $row) use ($queue, $replicationFactor, &$nodes, &$nodeShardsMap) {
-			/** @var Map<string,Set<string>> $clusterMap */
+			/** @var Map<string,Cluster> $clusterMap */
 			$nodes->add($row['node']);
 			$nodeShardsMap[$row['node']] = $row['shards'];
 
@@ -213,7 +217,12 @@ final class Table {
 
 			return $clusterMap;
 		};
-		$schema->reduce($reduceFn, new Map);
+		$clusterMap = $schema->reduce($reduceFn, new Map);
+
+		// Now process all postponed pending tables to attach to each cluster
+		foreach ($clusterMap as $cluster) {
+			$cluster->processPendingTables($queue);
+		}
 
 		/** @var Set<int> */
 		$queueIds = new Set;
@@ -233,13 +242,65 @@ final class Table {
 	}
 
 	/**
+	 * Drop the whole sharded table
+	 * @param Queue $queue
+	 * @return Map<string,mixed>
+	 */
+	public function drop(Queue $queue): Map {
+		/** @var Map<string,mixed> */
+		$result = new Map(
+			[
+				'status' => 'processing',
+				'type' => 'drop',
+				'result' => null,
+				'structure' => $this->structure,
+				'extra' => $this->extra,
+			]
+		);
+
+		/** @var Set<string> */
+		$nodes = new Set;
+
+		/** @var Set<int> */
+		$queueIds = new Set;
+
+		/** @var Set<string> */
+		$processedTables = new Set;
+
+		// Get the current shard schema
+		$schema = $this->getShardSchema();
+
+		// Iterate through all nodes and their shards
+		foreach ($schema as $row) {
+			$nodes->add($row['node']);
+			$ids = $this->cleanUpNode($queue, $row['node'], $row['shards'], $processedTables);
+			$queueIds->add(...$ids);
+		}
+
+		// Remove the sharding configuration from the system table
+		$systemTable = $this->cluster->getSystemTableName($this->table);
+		$this->client->sendRequest(
+			"
+			DELETE FROM {$systemTable}
+			WHERE
+			cluster = '{$this->cluster->name}'
+			AND
+			table = '{$this->name}'
+			"
+		);
+
+		$result['nodes'] = $nodes;
+		$result['queue_ids'] = $queueIds;
+		return $result;
+	}
+	/**
 	 * Handle replication for the table and shard
 	 * @param  string $node
 	 * @param  Queue  $queue
 	 * @param  Set<string>    $connectedNodes
-	 * @param  Map<string,Set<string>>   $clusterMap
+	 * @param  Map<string,Cluster>   $clusterMap
 	 * @param  int    $shard
-	 * @return Map<string,Set<string>> The cluster map that we use
+	 * @return Map<string,Cluster> The cluster map that we use
 	 *  for session to maintain which nodes are connected
 	 *  and which cluster are processed already and who is the owner
 	 */
@@ -250,42 +311,44 @@ final class Table {
 		Map $clusterMap,
 		int $shard
 	): Map {
-		$clusterName = $this->getClusterName($connectedNodes);
+		$clusterName = static::getClusterName($connectedNodes);
 		$hasCluster = isset($clusterMap[$clusterName]);
-		$cluster = new Cluster($this->client, $clusterName, $node);
-		if (!$hasCluster) {
+		if ($hasCluster) {
+			$cluster = $clusterMap[$clusterName];
+		} else {
+			$cluster = new Cluster($this->client, $clusterName, $node);
 			$nodesToJoin = $connectedNodes->filter(
 				fn ($connectedNode) => $connectedNode !== $node
 			);
-			$clusterMap[$clusterName] = new Set;
+			$clusterMap[$clusterName] = $cluster;
 			$waitForId = $cluster->create($queue);
 			$queue->setWaitForId($waitForId);
 			$cluster->addNodeIds($queue, ...$nodesToJoin);
 			$queue->resetWaitForId();
 		}
 
-		$table = $this->getTableShardName($shard);
-		if (!$clusterMap->get($clusterName)->contains($table)) {
-			$clusterMap->get($clusterName)->add($table);
+		/** @var Cluster $cluster */
+		$table = $this->getShardName($shard);
+		if (!$cluster->hasPendingTable($table, TableOperation::Attach)) {
+			$cluster->addPendingTable($table, TableOperation::Attach);
 			$sql = $this->getCreateTableShardSQL($shard);
 			$queue->add($node, $sql);
-			$cluster->addTables($queue, $table);
 		}
 		return $clusterMap;
 	}
 
 	/**
-   * Rebalances the shards,
-   * identifying affected shards from inactive nodes
-   * and moving only them.
-   *
-   * @param Queue $queue
-   * @return void
-   */
- 	// @phpcs:ignore SlevomatCodingStandard.Complexity.Cognitive.ComplexityTooHigh
+	 * Rebalances the shards,
+	 * identifying affected shards from inactive nodes
+	 * and moving only them.
+	 *
+	 * @param Queue $queue
+	 * @return void
+	 */
+	// @phpcs:ignore SlevomatCodingStandard.Complexity.Cognitive.ComplexityTooHigh
 	public function rebalance(Queue $queue): void {
 		try {
-			/** @var Map<string,Set<string>> */
+			/** @var Map<string,Cluster> */
 			$clusterMap = new Map;
 
 			$schema = $this->getShardSchema();
@@ -306,17 +369,23 @@ final class Table {
 
 			// Preload current cluster map with configuration
 			foreach ($shardNodesMap as $shard => $connections) {
-				$clusterName = $this->getClusterName($connections);
-				$clusterMap[$clusterName] ??= new Set;
-				$clusterMap->get($clusterName)->add(...$connections);
+				$clusterName = static::getClusterName($connections);
+				$connections->sort();
+				$node = $connections->first();
+				$cluster = new Cluster($this->client, $clusterName, $node);
+				$clusterMap[$clusterName] = $cluster;
 			}
 
 			$affectedSchema = $schema->filter(
 				fn ($row) => $inactiveNodes->contains($row['node'])
 			);
+
+			/** @var Set<string> */
+			$processedTables = new Set;
+
 			foreach ($affectedSchema as $row) {
 				// First thing first, remove from inactive node using the queue
-				$this->cleanUpNode($queue, $row['node'], $row['shards']);
+				$this->cleanUpNode($queue, $row['node'], $row['shards'], $processedTables);
 
 				// Do real rebaliance now
 				foreach ($row['shards'] as $shard) {
@@ -367,10 +436,10 @@ final class Table {
 				}
 			}
 
-		/** @var Set<int> */
+			/** @var Set<int> */
 			$queueIds = new Set;
 			foreach ($newSchema as $row) {
-				$sql = "DROP TABLE {$this->name}";
+				$sql = "DROP TABLE {$this->name} OPTION force=1";
 				$queueId = $queue->add($row['node'], $sql);
 				$queueIds->add($queueId);
 				// Do nothing when no shards present for this node
@@ -384,7 +453,7 @@ final class Table {
 
 			$this->updateScheme($newSchema);
 		} catch (\Throwable $t) {
-			var_dumP($t->getMessage());
+			var_dump($t->getMessage());
 		}
 	}
 
@@ -393,19 +462,64 @@ final class Table {
 	 * @param Queue $queue
 	 * @param  string $nodeId
 	 * @param  Set<int>    $shards
-	 * @return static
+	 * @param  Set<string> $processedTables we used processed tables cuz we cannot unable delete cluster
+	 *  due to this method also used in rebalancing, so we leave cluster created between nodes cuz it should not
+	 *  be a huge deal due to we maintain interconnection between nodes that is probably will be useful
+	 *  in cluster environment and anyway will be rercreated for another sharded table or whatever
+	 * @return Set<int>
 	 */
-	public function cleanUpNode(Queue $queue, string $nodeId, Set $shards): static {
-		// Delete distributed table
-		/** @var Set<string> $removedClusters list of clusters that we will delete */
-		$removedClusters = new Set;
-		$queue->add($nodeId, "DROP TABLE {$this->name}");
+	public function cleanUpNode(Queue $queue, string $nodeId, Set $shards, Set $processedTables): Set {
+		/** @var Set<int> */
+		$queueIds = new Set;
+		$queueIds[] = $queue->add($nodeId, "DROP TABLE IF EXISTS {$this->name} OPTION force=1");
+
 		foreach ($shards as $shard) {
-			// First remove cluster, due to we need to detach tables first
 			$connections = $this->getConnectedNodes(new Set([$shard]));
-			$clusterName = $this->getClusterName($connections);
-			$table = $this->getTableShardName($shard);
-			// Now detach table from all connections
+			$clusterName = static::getClusterName($connections);
+			$table = $this->getShardName($shard);
+
+			if (sizeof($connections) > 1) {
+				$this->handleClusteredCleanUp(
+					$queue,
+					$nodeId,
+					$connections,
+					$clusterName,
+					$table,
+					$queueIds,
+					$processedTables
+				);
+			} else {
+				$this->handleSingleNodeCleanUp($queue, $nodeId, $table, $queueIds);
+			}
+		}
+
+		return $queueIds;
+	}
+
+	/**
+	 * @param Queue $queue
+	 * @param string $nodeId
+	 * @param Set<string> $connections
+	 * @param string $clusterName
+	 * @param string $table
+	 * @param Set<int> $queueIds
+	 * @param Set<string> $processedTables
+	 * @return void
+	 * @throws RuntimeException
+	 * @throws ManticoreSearchClientError
+	 * @throws Exception
+	 * @return void
+	 */
+	private function handleClusteredCleanUp(
+		Queue $queue,
+		string $nodeId,
+		Set $connections,
+		string $clusterName,
+		string $table,
+		Set $queueIds,
+		Set $processedTables
+	): void {
+		if (!$processedTables->contains($table)) {
 			foreach ($connections as $connectedNode) {
 				if ($connectedNode === $nodeId) {
 					continue;
@@ -415,29 +529,27 @@ final class Table {
 					$clusterName,
 					$connectedNode
 				);
-				$cluster->makePrimary($queue);
-				$cluster->removeTables($queue, $table);
+				$queueIds[] = $cluster->makePrimary($queue);
+				$queueIds[] = $cluster->removeTables($queue, $table);
+				$processedTables->add($table);
 			}
-
-			// We run it on active node, not down one
-			if (isset($cluster) && !$removedClusters->contains($cluster->name)) {
-				// We need to fire delete cluster once
-				$queueId = $cluster->remove($queue);
-
-				// Clean up the table associated with this cluster
-				$queue
-					->setWaitForId($queueId)
-					->add($nodeId, "DROP TABLE {$table}");
-				$queue->resetWaitForId();
-
-				$removedClusters->add($cluster->name);
-			}
-			unset($cluster);
 		}
 
-		return $this;
+		$queueIds[] = $queue->add($nodeId, "DROP TABLE IF EXISTS {$table}");
 	}
 
+	/**
+	 * @param Queue $queue
+	 * @param string $nodeId
+	 * @param string $table
+	 * @param Set<int> &$queueIds
+	 * @return void
+	 * @throws RuntimeException
+	 * @throws ManticoreSearchClientError
+	 */
+	private function handleSingleNodeCleanUp(Queue $queue, string $nodeId, string $table, Set &$queueIds): void {
+		$queueIds[] = $queue->add($nodeId, "DROP TABLE IF EXISTS {$table}");
+	}
 	/**
 	 * Convert schema to map where each shard has nodes
 	 * @param  Vector<array{node:string,shards:Set<int>,connections:Set<string>}> $schema
@@ -458,13 +570,13 @@ final class Table {
 		);
 	}
 
-  /**
-   * Get available node for rebalancing
-   * @param  Map<string,Set<int>>    $activeShardsMap
-   * @param  int    $shard
-   * @param int $count How many nodes we need to pull and equals to lost replicas
-   * @return Set<string>
-   */
+	/**
+	 * Get available node for rebalancing
+	 * @param  Map<string,Set<int>>    $activeShardsMap
+	 * @param  int    $shard
+	 * @param int $count How many nodes we need to pull and equals to lost replicas
+	 * @return Set<string>
+	 */
 	protected function getAvailableNodes(
 		Map $activeShardsMap,
 		int $shard,
@@ -490,7 +602,7 @@ final class Table {
 	 * @param Set<string> $connections
 	 * @return string
 	 */
-	protected function getClusterName(Set $connections): string {
+	public static function getClusterName(Set $connections): string {
 		$hash = md5($connections->sorted()->join(','));
 		if (is_numeric($hash[0])) {
 			$hash[0] = chr(97 + ($hash[0] % 6));
@@ -506,9 +618,18 @@ final class Table {
 	protected function getCreateTableShardSQL(int $shard): string {
 		$structure = $this->structure ? "({$this->structure})" : '';
 		// We can call this method on rebalancing, that means
-		// table may exist, so to supress error we use
+		// table may exist, so to suppress error we use
 		// if not exists to keep logic simpler
-		return "CREATE TABLE IF NOT EXISTS `{$this->getTableShardName($shard)}` {$structure} {$this->extra}";
+		return "CREATE TABLE IF NOT EXISTS {$this->getShardName($shard)} {$structure} {$this->extra}";
+	}
+
+	/**
+	 * We use it outside in distributed insert logic
+	 * @param  int    $shard
+	 * @return string
+	 */
+	public static function getTableShardName(string $table, int $shard): string {
+		return "system.{$table}_s{$shard}";
 	}
 
 	/**
@@ -516,8 +637,8 @@ final class Table {
 	 * @param  int    $shard
 	 * @return string
 	 */
-	protected function getTableShardName(int $shard): string {
-		return "{$this->name}_s{$shard}";
+	protected function getShardName(int $shard): string {
+		return static::getTableShardName($this->name, $shard);
 	}
 
 	/**
@@ -529,7 +650,7 @@ final class Table {
 		// Calculate local tables
 		$locals = new Set;
 		foreach ($shards as $shard) {
-			$locals->add("local='{$this->name}_s{$shard}'");
+			$locals->add("local='{$this->getShardName($shard)}'");
 		}
 
 		// Calculate external tables
@@ -539,8 +660,9 @@ final class Table {
 		foreach ($nodes as $row) {
 			foreach ($row['shards'] as $shard) {
 				$map[$shard] ??= new Set;
+				$shardName = $this->getShardName($shard);
 				// @phpstan-ignore-next-line
-				$map[$shard]->add("{$row['node']}:{$this->name}_s{$shard}");
+				$map[$shard]->add("{$row['node']}:{$shardName}");
 			}
 		}
 
@@ -553,10 +675,10 @@ final class Table {
 			$agents->add("agent='{$nodes->join('|')}'");
 		}
 
-		// Finaly generate create table
+		// Finally generate create table
 		return "CREATE TABLE `{$this->name}`
 			type='distributed' {$locals->sorted()->join(' ')} {$agents->sorted()->join(' ')}
-		";
+			";
 	}
 
 
@@ -568,20 +690,20 @@ final class Table {
 	protected function updateScheme(Vector $scheme): static {
 		$table = $this->cluster->getSystemTableName($this->table);
 		$query = "
-			DELETE FROM {$table}
-			WHERE
-				cluster = '{$this->cluster->name}'
-					AND
-				table = '{$this->name}'
+		DELETE FROM {$table}
+		WHERE
+		cluster = '{$this->cluster->name}'
+		AND
+		table = '{$this->name}'
 		";
 		$this->client->sendRequest($query);
 		foreach ($scheme as $row) {
 			$shardsMva = $row['shards']->join(',');
 			$query = "
-				INSERT INTO {$table}
-					(`cluster`, `node`, `table`, `shards`)
-				VALUES
-					('{$this->cluster->name}', '{$row['node']}', '{$this->name}', ($shardsMva))
+			INSERT INTO {$table}
+			(`cluster`, `node`, `table`, `shards`)
+			VALUES
+			('{$this->cluster->name}', '{$row['node']}', '{$this->name}', ($shardsMva))
 			";
 			$this->client->sendRequest($query);
 		}
@@ -600,14 +722,14 @@ final class Table {
 				'Trying to initialize while already initialized.'
 			);
 		}
-		$query = "CREATE TABLE `{$this->table}` (
-			`cluster` string,
-			`node` string,
-			`table` string,
-			`shards` multi
+		$query = "CREATE TABLE {$this->table} (
+		`cluster` string,
+		`node` string,
+		`table` string,
+		`shards` multi
 		)";
 		$this->client->sendRequest($query);
-		$this->cluster->attachTable($this->table);
+		$this->cluster->attachTables($this->table);
 	}
 
 	/**

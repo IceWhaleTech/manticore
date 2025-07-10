@@ -1,0 +1,149 @@
+––– block: start-searchd –––
+––– block: init-database –––
+––– input –––
+mysql -h0 -P9306 -e 'show tables'
+––– output –––
++---------------------+-------------+
+| Table               | Type        |
++---------------------+-------------+
+| distributed_index   | distributed |
+| rt_with_columnar    | rt          |
+| rt_without_columnar | rt          |
+| test                | rt          |
++---------------------+-------------+
+––– input –––
+mysql -h0 -P9306 -e 'show create table distributed_index'
+––– output –––
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table             | Create Table                                                                                                                                                              |
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| distributed_index | CREATE TABLE distributed_index type='distributed' local='rt_with_columnar' local='rt_without_columnar' agent='127.0.0.1:9312:plain_with_columnar, plain_without_columnar' |
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+mysql -h0 -P9306 -e 'show create table rt_with_columnar'
+––– output –––
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table            | Create Table                                                                                                                                                           |
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| rt_with_columnar | CREATE TABLE rt_with_columnar (
+id bigint,
+title text,
+category_id integer,
+price float,
+description string attribute engine='columnar',
+tags multi,
+attributes json
+) |
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+mysql -h0 -P9306 -e 'show create table rt_without_columnar'
+––– output –––
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table               | Create Table                                                                                                                                            |
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| rt_without_columnar | CREATE TABLE rt_without_columnar (
+id bigint,
+title text,
+category_id integer,
+price float,
+description string attribute,
+tags multi,
+attributes json
+) |
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+ls -lt /tmp/backup-*
+––– output –––
+ls: cannot access '/tmp/backup-*': No such file or directory
+––– input –––
+mysql -h0 -P9306 -e "flush ramchunk test; select * from test.@files;"
+––– output –––
++------+---------------------------------------+---------------------------------------+--------+
+| id   | file                                  | normalized                            | size   |
++------+---------------------------------------+---------------------------------------+--------+
+|    2 | /var/lib/manticore/test/test.settings | /var/lib/manticore/test/test.settings |      %{NUMBER} |
+|    3 | /var/lib/manticore/test/test.0.sph    | /var/lib/manticore/test/test.0.sph    |    %{NUMBER} |
+|    4 | /var/lib/manticore/test/test.0.spd    | /var/lib/manticore/test/test.0.spd    |     %{NUMBER} |
+|    5 | /var/lib/manticore/test/test.0.spp    | /var/lib/manticore/test/test.0.spp    |      %{NUMBER} |
+|    6 | /var/lib/manticore/test/test.0.spe    | /var/lib/manticore/test/test.0.spe    |      %{NUMBER} |
+|    7 | /var/lib/manticore/test/test.0.spi    | /var/lib/manticore/test/test.0.spi    |     %{NUMBER} |
+|    8 | /var/lib/manticore/test/test.0.spm    | /var/lib/manticore/test/test.0.spm    |      %{NUMBER} |
+|    9 | /var/lib/manticore/test/test.0.sphi   | /var/lib/manticore/test/test.0.sphi   |     %{NUMBER} |
+|   10 | /var/lib/manticore/test/test.0.spds   | /var/lib/manticore/test/test.0.spds   |     %{NUMBER} |
+|   11 | /var/lib/manticore/test/test.0.spknn  | /var/lib/manticore/test/test.0.spknn  |    %{NUMBER} |
+|   12 | /var/lib/manticore/test/test.0.spt    | /var/lib/manticore/test/test.0.spt    |     %{NUMBER} |
+|   13 | /var/lib/manticore/test/test.0.spidx  | /var/lib/manticore/test/test.0.spidx  |    %{NUMBER} |
+|   14 | /var/lib/manticore/test/test.0.spa    | /var/lib/manticore/test/test.0.spa    |     %{NUMBER} |
+|   15 | /var/lib/manticore/test/test.0.spb    | /var/lib/manticore/test/test.0.spb    | %{NUMBER} |
+|    1 | /var/lib/manticore/test/test.meta     | /var/lib/manticore/test/test.meta     |    %{NUMBER} |
++------+---------------------------------------+---------------------------------------+--------+
+––– input –––
+manticore-backup --backup-dir=/tmp
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file: /etc/manticoresearch/manticore.conf
+Tables to backup: all tables
+Backup dir: /tmp
+Manticore config
+endpoint =  http://%{IPADDR}:9312
+Manticore versions:
+manticore: %{VERSION}
+columnar: %{VERSION}
+secondary: %{VERSION}
+knn: %{VERSION}
+buddy: %{VERSION}
+%{DATETIME} [Info] Starting the backup...
+%{DATETIME} [Info] Backing up config files...
+%{DATETIME} [Info]   config files - OK
+%{DATETIME} [Info] Backing up global state files...
+%{DATETIME} [Info]   global state files – OK
+%{DATETIME} [Info] Backing up tables...
+%{DATETIME} [Info]   distributed_index (distributed)...
+%{DATETIME} [Info]   SKIP
+%{DATETIME} [Info]   rt_with_columnar (rt) [#!/[0-9]{1}\.[0-9]{3}/!#K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_without_columnar (rt) [#!/[0-9]{1}\.[0-9]{3}/!#K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   test (rt) [130.389K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info] Running sync
+%{DATETIME} [Info]  OK
+%{DATETIME} [Info] You can find backup here: /tmp/backup-#!/[0-9]{14}/!#
+%{DATETIME} [Info] Elapsed time: #!/[0-9]+/!#.#!/[0-9]+/!#s
+%{DATETIME} [Info] Done
+%{DATETIME} [Info]
+Unfreezing all tables...
+%{DATETIME} [Info]   distributed_index...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_with_columnar...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_without_columnar...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   test...
+%{DATETIME} [Info]    OK
+––– input –––
+ls -lh /tmp/backup-*
+––– output –––
+total 16K
+%{FILEPERMS} %{NUMBER} root root 4.0K #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# config
+%{FILEPERMS} %{NUMBER} root root 4.0K #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# data
+%{FILEPERMS} %{NUMBER} root root 4.0K #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# state
+%{FILEPERMS} %{NUMBER} root root  %{NUMBER} #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# versions.json
+––– input –––
+ls -1v /tmp/backup-*/data/test/
+––– output –––
+test.meta
+test.settings
+test.0.spa
+test.0.spb
+test.0.spd
+test.0.spds
+test.0.spe
+test.0.sph
+test.0.sphi
+test.0.spi
+test.0.spidx
+test.0.spknn
+test.0.spm
+test.0.spp
+test.0.spt

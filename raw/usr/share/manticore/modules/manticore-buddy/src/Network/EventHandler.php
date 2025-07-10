@@ -16,6 +16,7 @@ use Manticoresearch\Buddy\Base\Lib\QueryProcessor;
 use Manticoresearch\Buddy\Core\Error\GenericError;
 use Manticoresearch\Buddy\Core\Error\InvalidNetworkRequestError;
 use Manticoresearch\Buddy\Core\ManticoreSearch\RequestFormat;
+use Manticoresearch\Buddy\Core\Network\OutputFormat;
 use Manticoresearch\Buddy\Core\Network\Request;
 use Manticoresearch\Buddy\Core\Network\Response;
 use Manticoresearch\Buddy\Core\Task\Column;
@@ -23,7 +24,7 @@ use Manticoresearch\Buddy\Core\Task\TaskPool;
 use Manticoresearch\Buddy\Core\Task\TaskResult;
 use Manticoresearch\Buddy\Core\Tool\Buddy;
 use Swoole\Coroutine;
-use Swoole\Coroutine\Channel;
+use Swoole\Coroutine\WaitGroup;
 use Swoole\Http\Request as SwooleRequest;
 use Swoole\Http\Response as SwooleResponse;
 use Throwable;
@@ -59,19 +60,26 @@ final class EventHandler {
 			$response->end(Response::none());
 			return;
 		}
+		$startTime = hrtime(true);
 		$requestId = $request->header['Request-ID'] ?? uniqid(more_entropy: true);
 		$body = $request->rawContent() ?: '';
-		$channel = new Channel(1);
+		$waitGroup = new WaitGroup();
+		$waitGroup->add(1);
+		$result = '';
 		Coroutine::create(
-			static function () use ($requestId, $body, $channel) {
-				Buddy::debug("[$requestId] request data: $body");
-				$result = (string)static::process($requestId, $body);
-				Buddy::debug("[$requestId] response data: $result");
-				$channel->push($result);
+			static function () use ($requestId, $body, $startTime, $waitGroup, &$result) {
+				try {
+					Buddy::debug("[$requestId] request data: $body");
+					$result = (string)static::process($requestId, $body);
+					Buddy::debug("[$requestId] response data: $result");
+					Buddy::debug("[$requestId] response time: " . round((hrtime(true) - $startTime) / 1e6, 3) . ' ms');
+				} finally {
+					$waitGroup->done();
+				}
 			}
 		);
-		/** @var string $result */
-		$result = $channel->pop();
+
+		$waitGroup->wait();
 		$response->header('Content-Type', 'application/json');
 		$response->status(200);
 		$response->end($result);
@@ -85,9 +93,10 @@ final class EventHandler {
 	 */
 	public static function process(string $id, string $payload): Response {
 		try {
+			/** @var int $startTime */
+			$startTime = hrtime(true);
 			$request = Request::fromString($payload, $id);
 			$handler = QueryProcessor::process($request)->run();
-
 			// In case deferred we return the ID of the task not the request
 			if ($handler->isDeferred()) {
 				$doneFn = TaskPool::add($id, $request->payload);
@@ -99,20 +108,39 @@ final class EventHandler {
 				$result = $handler->getResult();
 			}
 
-			$response = Response::fromMessage($result->getStruct(), $request->format);
-		} catch (Throwable $e) {
-			Buddy::debugv($e->getFile().':'.$e->getLine().'  '.$e->getMessage());
-			/** @var string $originalError */
-			$originalError = match (true) {
-				isset($request) => $request->error,
-				default => ((array)json_decode($payload, true))['error'] ?? '',
+			// Check if this is a cli and we need to activate Table Formatter
+			$outputFormat = $request->getOutputFormat();
+			$message = match ($outputFormat) {
+				// TODO: Maybe later we can use meta for time, but not now cuz no time for non select
+				OutputFormat::Table => $result->getTableFormatted($startTime),
+				OutputFormat::Plain => $result->toString(),
+				default => $result->getStruct(),
 			};
+			$response = Response::fromMessageAndMeta(
+				$message,
+				$result->getMeta(),
+				$request->format,
+			);
+		} catch (Throwable $e) {
+			if (isset($request)) {
+				/** @var string $originalError */
+				$originalError = $request->error;
+				/** @var array<mixed> $originalErrorBody */
+				$originalErrorBody = $request->errorBody;
+			} else {
+				/** @var array{error?:array{message:string,body?:array{error:string}}} $payloadInfo */
+				$payloadInfo = (array)simdjson_decode($payload, true);
+				$originalError = $payloadInfo['error']['message'] ?? '';
+				$originalErrorBody = $payloadInfo['error']['body'] ?? [];
+			}
 
 			// We proxy original error in case when we do not know how to handle query
 			// otherwise we send our custom error
 			if (static::shouldProxyError($e)) {
 				/** @var GenericError $e */
 				$e->setResponseError($originalError);
+				$e->setResponseErrorBody($originalErrorBody);
+				Buddy::error($e, "[$id] processing error");
 			} elseif (!is_a($e, GenericError::class)) {
 				$e = GenericError::create($originalError);
 			}

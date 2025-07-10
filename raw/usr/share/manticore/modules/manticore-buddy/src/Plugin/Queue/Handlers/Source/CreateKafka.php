@@ -13,7 +13,9 @@ namespace Manticoresearch\Buddy\Base\Plugin\Queue\Handlers\Source;
 
 use Manticoresearch\Buddy\Base\Plugin\Queue\Handlers\View\CreateViewHandler;
 use Manticoresearch\Buddy\Base\Plugin\Queue\Payload;
+use Manticoresearch\Buddy\Core\Error\GenericError;
 use Manticoresearch\Buddy\Core\Error\ManticoreSearchClientError;
+use Manticoresearch\Buddy\Core\Error\QueryValidationError;
 use Manticoresearch\Buddy\Core\ManticoreSearch\Client;
 use Manticoresearch\Buddy\Core\Task\TaskResult;
 use Manticoresearch\Buddy\Core\Tool\Buddy;
@@ -129,6 +131,13 @@ final class CreateKafka extends BaseCreateSourceHandler {
 
 		$options = self::parseOptions($payload);
 
+		if (!empty($options->partitionList) && $options->numConsumers > 1) {
+			throw ManticoreSearchClientError::create(
+				"You can't create multiple consumers when specifying a partition. ".
+				'In this case, num_consumers must be set to 1.'
+			);
+		}
+
 		$sql = /** @lang ManticoreSearch */
 			'SELECT * FROM ' . Payload::SOURCE_TABLE_NAME .
 			" WHERE match('@name \"" . $options->name . "\"')";
@@ -145,13 +154,15 @@ final class CreateKafka extends BaseCreateSourceHandler {
 					'broker' => $options->brokerList,
 					'topic' => $options->topicList,
 					'group' => $options->consumerGroup ?? 'manticore',
+					'partitions' => $options->partitionList ?? [],
 					'batch' => $options->batch ?? '100',
 				]
 			);
 
+			$bufferTablePrefix = Payload::BUFFER_TABLE_PREFIX;
 			/** @l $query */
 			$query = /** @lang ManticoreSearch */
-				"CREATE TABLE _buffer_{$options->name}_{$i} $options->schema";
+				"CREATE TABLE {$bufferTablePrefix}{$options->name}_{$i} $options->schema";
 
 			$request = $manticoreClient->sendRequest($query);
 			if ($request->hasError()) {
@@ -159,12 +170,13 @@ final class CreateKafka extends BaseCreateSourceHandler {
 			}
 
 			$escapedPayload = str_replace("'", "\\'", $payload->originQuery);
+			$customMapping = str_replace("'", "\\'", $options->customMapping);
 
 			$query = /** @lang ManticoreSearch */
 				'INSERT INTO ' . Payload::SOURCE_TABLE_NAME .
-				' (id, type, name, full_name, buffer_table, attrs, original_query) VALUES ' .
+				' (id, type, name, full_name, buffer_table, attrs, custom_mapping, original_query) VALUES ' .
 				"(0, '" . self::SOURCE_TYPE_KAFKA . "', '$options->name','{$options->name}_$i'," .
-				"'_buffer_{$options->name}_$i', '$attrs', '$escapedPayload')";
+				"'{$bufferTablePrefix}{$options->name}_$i', '$attrs', '$customMapping', '$escapedPayload')";
 
 			$request = $manticoreClient->sendRequest($query);
 			if ($request->hasError()) {
@@ -316,7 +328,10 @@ final class CreateKafka extends BaseCreateSourceHandler {
 
 		$parsedPayload = $payload->model->getPayload();
 		$result->name = strtolower($parsedPayload['SOURCE']['name']);
-		$result->schema = strtolower($parsedPayload['SOURCE']['create-def']['base_expr']);
+
+		$mapping = self::parseMapping($parsedPayload['SOURCE']['create-def']['sub_tree']);
+		$result->customMapping = $mapping['customMapping'];
+		$result->schema = $mapping['schema'];
 
 		foreach ($parsedPayload['SOURCE']['options'] as $option) {
 			if (!isset($option['sub_tree'][0]['base_expr'])) {
@@ -334,9 +349,75 @@ final class CreateKafka extends BaseCreateSourceHandler {
 				$result->numConsumers = (int)SqlQueryParser::removeQuotes($option['sub_tree'][2]['base_expr']),
 				'batch' =>
 				$result->batch = (int)SqlQueryParser::removeQuotes($option['sub_tree'][2]['base_expr']),
+				'partition_list' =>
+				$result->partitionList = self::parsePartitions($option['sub_tree'][2]['base_expr']),
 				default => ''
 			};
 		}
 		return $result;
+	}
+
+	/**
+	 * @param string $option
+	 *
+	 * @return array<int>
+	 * @throws GenericError
+	 */
+	private static function parsePartitions(string $option): array {
+
+		$partitions = explode(',', SqlQueryParser::removeQuotes($option));
+		$partitions = array_map('intval', $partitions);
+		foreach ($partitions as $partition) {
+			if (is_int($partition) && $partition >= 0) {
+				continue;
+			}
+
+			GenericError::throw("Invalid partition value: $partition");
+		}
+		return $partitions;
+	}
+
+	/**
+   * @param array{
+	 *                      expr_type: string,
+	 *                      base_expr: string,
+	 *                      sub_tree: array{
+	 *                          expr_type: string,
+	 *                          base_expr: string,
+	 *                          sub_tree: array{
+	 *                              expr_type: string,
+	 *                              base_expr: string
+	 *                          }[]
+	 *                      }[]
+	 *                  }[] $fields
+   *
+   * @return array{customMapping: non-empty-string|false, schema:non-falsy-string}
+	 * @throws GenericError
+*/
+	public static function parseMapping(array $fields): array {
+		$schema = [];
+		$customMapping = [];
+		$pattern = '/^`?([a-zA-Z0-9_]+)`?\s*[\'"]+(.*)[\'"]+\s([a-zA-Z]+)$/usi';
+
+		foreach ($fields as $field) {
+			$definition = strtolower($field['base_expr']);
+
+			if (preg_match($pattern, $definition, $matches)) {
+				$schema[] = $matches[1].' '.$matches[3];
+				$customMapping[$matches[1]] = $matches[2];
+				continue;
+			}
+
+			$schema[] = $definition	;
+		}
+
+		$encodedMapping = json_encode($customMapping);
+		if ($encodedMapping === false) {
+			QueryValidationError::throw('Incorrect custom mapping provided');
+		}
+		return [
+			'customMapping' => $encodedMapping,
+			'schema' => '('.implode(',', $schema).')',
+		];
 	}
 }

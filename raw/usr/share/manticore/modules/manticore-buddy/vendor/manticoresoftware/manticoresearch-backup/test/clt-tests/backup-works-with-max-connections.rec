@@ -1,0 +1,124 @@
+––– input –––
+cp test/clt-tests/config/manticore-vip.conf /etc/manticoresearch/manticore.conf
+––– output –––
+––– input –––
+searchd
+––– output –––
+Manticore %{VERSION} (columnar %{VERSION}) (secondary %{VERSION}) (knn %{VERSION})
+Copyright (c) 2001-2016, Andrew Aksyonoff
+Copyright (c) 2008-2016, Sphinx Technologies Inc (http://sphinxsearch.com)
+Copyright (c) 2017-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+[#!/[0-9]{2}:[0-9]{2}\.[0-9]{3}/!#] [#!/[0-9]+/!#] using config file '/etc/manticoresearch/manticore.conf' (#!/[0-9]+/!# chars)...
+starting daemon version '%{VERSION} (columnar %{VERSION}) (secondary %{VERSION}) (knn %{VERSION})' ...
+listening on %{IPADDR}:9312 for sphinx and http(s)
+listening on %{IPADDR}:9306 for mysql
+listening on %{IPADDR}:9307 for VIP mysql
+listening on %{IPADDR}:9308 for sphinx and http(s)
+listening on %{IPADDR}:9313 for VIP sphinx and http(s)
+––– input –––
+manticore-backup --version
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore Backup version: %{VERSION}
+––– block: init-database –––
+––– input –––
+curl localhost:9312/sql?mode=raw -d 'query=debug sleep 10' &
+––– output –––
+[1] %{NUMBER}
+––– input –––
+mysql -h0 -P9307 -e 'show tables'
+––– output –––
++---------------------+-------------+
+| Table               | Type        |
++---------------------+-------------+
+| distributed_index   | distributed |
+| rt_with_columnar    | rt          |
+| rt_without_columnar | rt          |
+| test                | rt          |
++---------------------+-------------+
+––– input –––
+mysql -h0 -P9307 -e 'show create table distributed_index'
+––– output –––
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table             | Create Table                                                                                                                                                              |
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| distributed_index | CREATE TABLE distributed_index type='distributed' local='rt_with_columnar' local='rt_without_columnar' agent='127.0.0.1:9312:plain_with_columnar, plain_without_columnar' |
++-------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+mysql -h0 -P9307 -e 'show create table rt_with_columnar'
+––– output –––
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table            | Create Table                                                                                                                                                           |
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| rt_with_columnar | CREATE TABLE rt_with_columnar (
+id bigint,
+title text,
+category_id integer,
+price float,
+description string attribute engine='columnar',
+tags multi,
+attributes json
+) |
++------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+mysql -h0 -P9307 -e 'show create table rt_without_columnar'
+––– output –––
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table               | Create Table                                                                                                                                            |
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| rt_without_columnar | CREATE TABLE rt_without_columnar (
+id bigint,
+title text,
+category_id integer,
+price float,
+description string attribute,
+tags multi,
+attributes json
+) |
++---------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+––– input –––
+ls -lt /tmp/backup-*
+––– output –––
+ls: cannot access '/tmp/backup-*': No such file or directory
+––– input –––
+manticore-backup --backup-dir=/tmp
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file: /etc/manticoresearch/manticore.conf
+Tables to backup: all tables
+Backup dir: /tmp
+Manticore config
+endpoint =  http://%{IPADDR}:9313
+Manticore versions:
+manticore: %{VERSION}
+columnar: %{VERSION}
+secondary: %{VERSION}
+knn: %{VERSION}
+buddy: %{VERSION}
+%{DATETIME} [Info] Starting the backup...
+%{DATETIME} [Info] Backing up config files...
+%{DATETIME} [Info]   config files - OK
+%{DATETIME} [Info] Backing up global state files...
+%{DATETIME} [Info]   global state files – OK
+%{DATETIME} [Info] Backing up tables...
+%{DATETIME} [Info]   distributed_index (distributed)...
+%{DATETIME} [Info]   SKIP
+%{DATETIME} [Info]   rt_with_columnar (rt) [#!/[0-9]{1}\.[0-9]{3}/!#K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_without_columnar (rt) [#!/[0-9]{1}\.[0-9]{3}/!#K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   test (rt) [%{NUMBER}B]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info] Running sync
+%{DATETIME} [Info]  OK
+%{DATETIME} [Info] You can find backup here: /tmp/backup-%{NUMBER}
+%{DATETIME} [Info] Elapsed time: #!/([0-9]+\.[0-9]+|0)/!#s
+%{DATETIME} [Info] Done
+––– input –––
+ls -lh /tmp/backup-*
+––– output –––
+total 16K
+%{FILEPERMS} %{NUMBER} root root #!/[0-9]{1}\.[0-9]{1}/!#K #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# config
+%{FILEPERMS} %{NUMBER} root root #!/[0-9]{1}\.[0-9]{1}/!#K #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# data
+%{FILEPERMS} %{NUMBER} root root #!/[0-9]{1}\.[0-9]{1}/!#K #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# state
+%{FILEPERMS} %{NUMBER} root root  %{NUMBER} #!/[a-zA-Z]{3}/!# #!/[0-9]{1,2}/!# #!/[0-9]{2}:[0-9]{2}/!# versions.json

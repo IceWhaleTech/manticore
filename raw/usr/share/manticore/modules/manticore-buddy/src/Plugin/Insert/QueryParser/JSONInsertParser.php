@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
- Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+ Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2 or any later
@@ -21,6 +21,18 @@ class JSONInsertParser extends JSONParser implements InsertQueryParserInterface 
 	 * @var int $id
 	 */
 	protected ?int $id = null;
+
+	/**
+	 * @var bool $isElasticQuery
+	 */
+	protected bool $isElasticQuery;
+
+	/**
+	 * @return void
+	 */
+	public function __construct() {
+		$this->isElasticQuery = false;
+	}
 
 	/**
 	 * @param string $query
@@ -48,13 +60,14 @@ class JSONInsertParser extends JSONParser implements InsertQueryParserInterface 
 		if (!is_array($query)) {
 			throw new QueryParseError("Mandatory request field 'insert' must be an object");
 		}
-		if (!array_key_exists('index', $query)) {
-			throw new QueryParseError("Mandatory request field 'index' is missing");
+		$key = array_key_exists('index', $query) ? 'index' : 'table';
+		if (!isset($query[$key])) {
+			throw new QueryParseError("Mandatory request field '$key' is missing");
 		}
-		if (!is_string($query['index'])) {
-			throw new QueryParseError("Mandatory request field 'index' must be a string");
+		if (!is_string($query[$key])) {
+			throw new QueryParseError("Mandatory request field '$key' must be a string");
 		}
-		$this->name = $query['index'];
+		$this->name = $query[$key];
 		if (!array_key_exists('doc', $query)) {
 			throw new QueryParseError("Mandatory request field 'doc' is missing");
 		}
@@ -121,17 +134,16 @@ class JSONInsertParser extends JSONParser implements InsertQueryParserInterface 
 	 * @param array<mixed> $val
 	 * @return Datatype
 	 */
-	protected static function detectArrayVal(array $val): Datatype {
+	protected function detectArrayVal(array $val): Datatype {
 		if (!array_is_list($val)) {
 			return Datatype::Json;
 		}
 		$returnType = Datatype::Multi;
 		foreach ($val as $subVal) {
-			$subValType = self::detectValType($subVal);
-			if ($subValType === Datatype::Bigint) {
+			$subValType = $this->detectValType($subVal);
+			if ($returnType === Datatype::Multi && $subValType === Datatype::Bigint) {
 				$returnType = Datatype::Multi64;
-			}
-			if ($subValType !== Datatype::Bigint && $subValType !== Datatype::Int) {
+			} elseif ($subValType !== Datatype::Bigint && $subValType !== Datatype::Int) {
 				return Datatype::Json;
 			}
 		}
@@ -139,27 +151,47 @@ class JSONInsertParser extends JSONParser implements InsertQueryParserInterface 
 	}
 
 	/**
+	 * @param int $val
+	 * @return Datatype
+	 */
+	protected static function detectIntVal(int $val): Datatype {
+		return $val > Datalim::MySqlMaxInt->value ? Datatype::Bigint : Datatype::Int;
+	}
+
+	/**
+	 * @param string $val
+	 * @return Datatype
+	 */
+	protected static function detectStringVal(string $val): Datatype {
+		return match (true) {
+			self::isManticoreString($val) => Datatype::String,
+			self::isManticoreDate($val) => Datatype::Timestamp,
+			default => Datatype::Text,
+		};
+	}
+
+	/**
 	 * @param mixed $val
 	 * @return Datatype
 	 */
-	protected static function detectValType(mixed $val): Datatype {
-		if ($val === null) {
-			return Datatype::Null;
+	protected function detectValType(mixed $val): Datatype {
+		$type = match (true) {
+			($val === null) => Datatype::Null,
+			is_float($val) => Datatype::Float,
+			is_int($val) => self::detectIntVal($val),
+			is_string($val) => self::detectStringVal($val),
+			is_array($val) => $this->detectArrayVal($val),
+			default => Datatype::Text,
+		};
+		if (!$this->isElasticQuery) {
+			return $type;
 		}
-		if (is_float($val)) {
-			return Datatype::Float;
-		}
-		if (is_int($val)) {
-			if ($val > Datalim::MySqlMaxInt->value) {
-				return Datatype::Bigint;
-			}
-			return Datatype::Int;
-		}
-		if (is_array($val)) {
-			return self::detectArrayVal($val);
+		if ($type === Datatype::Text || $type === Datatype::String) {
+			$type = Datatype::Indexedstring;
+		} elseif ($type === Datatype::Json) {
+			$type = Datatype::Indexedjson;
 		}
 
-		return (is_string($val) && self::isManticoreString($val) === true) ? Datatype::String : Datatype::Text;
+		return $type;
 	}
-
 }

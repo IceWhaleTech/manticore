@@ -31,8 +31,7 @@ try {
 	$initBuffer = ob_get_clean();
 	putenv("PLUGIN_DIR={$settings->commonPluginDir}");
 } catch (Throwable $t) {
-	fwrite(STDERR, "Error while initialization: {$t->getMessage()}" . PHP_EOL);
-	Buddy::debug($t->getTraceAsString());
+	Buddy::error($t);
 	ob_flush();
 	exit(1);
 }
@@ -52,8 +51,9 @@ $server = Server::create(
 	'reactor_num' => $threads,
 	'worker_num' => max(1, (int)($threads / 4)),
 	'enable_reuse_port' => true,
-	'input_buffer_size' => 2097152,
-	'buffer_output_size' => 32 * 1024 * 1024, // byte in unit
+	'input_buffer_size' => 4 * 1024 * 1024,
+	'package_max_length' => 16 * 1024 * 1024, // byte in unit
+	'buffer_output_size' => 64 * 1024 * 1024, // byte in unit
 	'tcp_fastopen' => true,
 	// better not change, different oses different behaviour
 	// 'max_conn' => $threads * 2,
@@ -143,7 +143,6 @@ $server->beforeStart(
 if (is_telemetry_enabled()) {
 	$server->addTicker(
 		static function () {
-			Buddy::debugv('running metric snapshot');
 			MetricThread::instance()->execute(
 				'checkAndSnapshot',
 				[(int)(getenv('TELEMETRY_PERIOD', true) ?: 300)]

@@ -1,0 +1,136 @@
+––– input –––
+cp /etc/manticoresearch/manticore.conf /tmp/
+––– output –––
+––– input –––
+cp ./test/clt-tests/config/manticore.conf /etc/manticoresearch/manticore.conf
+––– output –––
+––– input –––
+searchd
+––– output –––
+Manticore %{VERSION} (columnar %{VERSION}) (secondary %{VERSION}) (knn %{VERSION})
+Copyright (c) 2001-2016, Andrew Aksyonoff
+Copyright (c) 2008-2016, Sphinx Technologies Inc (http://sphinxsearch.com)
+Copyright (c) 2017-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+[#!/[0-9]{2}:[0-9]{2}\.[0-9]{3}/!#] [#!/[0-9]+/!#] using config file '/etc/manticoresearch/manticore.conf' (#!/[0-9]+/!# chars)...
+starting daemon version '%{VERSION} (columnar %{VERSION}) (secondary %{VERSION}) (knn %{VERSION})' ...
+listening on %{IPADDR}:9312 for sphinx and http(s)
+listening on %{IPADDR}:9306 for mysql
+listening on %{IPADDR}:9308 for sphinx and http(s)
+––– input –––
+manticore-backup --version
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore Backup version: %{VERSION}
+––– input –––
+mysql -h0 -P9306 < test/clt-tests/dumps/tables.sql
+––– output –––
+––– input –––
+manticore-backup --version
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore Backup version: %{VERSION}
+––– input –––
+mysql -h0 -P9306 -e 'show tables'
+––– output –––
++---------------------+-------------+
+| Table               | Type        |
++---------------------+-------------+
+| distributed_index   | distributed |
+| rt_with_columnar    | rt          |
+| rt_without_columnar | rt          |
+| test                | rt          |
++---------------------+-------------+
+––– input –––
+manticore-backup --config=/etc/manticoresearch/manticore.conf --config=/tmp/manticore.conf --backup-dir=/tmp/
+––– output –––
+Copyright (c) %{YEAR}-%{YEAR}, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file: /etc/manticoresearch/manticore.conf
+Tables to backup: all tables
+Backup dir: /tmp/
+Manticore config
+endpoint =  http://%{IPADDR}:9312
+Manticore config
+endpoint =  http://%{IPADDR}:9312
+Manticore versions:
+manticore: %{VERSION}
+columnar: %{VERSION}
+secondary: %{VERSION}
+knn: %{VERSION}
+buddy: %{VERSION}
+%{DATETIME} [Info] Starting the backup...
+%{DATETIME} [Info] Backing up config files...
+%{DATETIME} [Info]   config files - OK
+%{DATETIME} [Info] Backing up global state files...
+%{DATETIME} [Info]   global state files – OK
+%{DATETIME} [Info] Backing up tables...
+%{DATETIME} [Info]   distributed_index (distributed)...
+%{DATETIME} [Info]   SKIP
+%{DATETIME} [Info]   rt_with_columnar (rt) [#!/[0-9]{1}\.[0-9]{3}/!#K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_without_columnar (rt) [#!/[0-9]{1}\.[0-9]{3}/!#K]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   test (rt) [%{NUMBER}B]...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info] Running sync
+%{DATETIME} [Info]  OK
+%{DATETIME} [Info] You can find backup here: /tmp/backup-%{NUMBER}
+%{DATETIME} [Info] Elapsed time: #!/([0-9]+\.[0-9]+|0)/!#s
+%{DATETIME} [Info] Done
+%{DATETIME} [Info]
+Unfreezing all tables...
+%{DATETIME} [Info]   distributed_index...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_with_columnar...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   rt_without_columnar...
+%{DATETIME} [Info]    OK
+%{DATETIME} [Info]   test...
+%{DATETIME} [Info]    OK
+––– input –––
+rm -rf /etc/manticoresearch/manticore.conf /tmp/manticore.conf /var/lib/manticore; mkdir /var/lib/manticore;
+––– output –––
+––– input –––
+manticore-backup --backup-dir=/tmp/ --restore
+––– output –––
+Copyright (c) 2023-2024, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file:
+Backup dir: /tmp/
+Available backups: 1
+backup-%{NUMBER} (#!/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{1,2}\s\d{4}\s\d{2}:\d{2}:\d{2}/!#)
+––– input –––
+ls /tmp/
+––– output –––
+backup-%{NUMBER}
+––– input –––
+export BACKUP_DATE=$(ls /tmp/)
+––– output –––
+––– input –––
+manticore-backup --backup-dir=/tmp/ --restore=$BACKUP_DATE
+––– output –––
+Copyright (c) 2023-2024, Manticore Software LTD (https://manticoresearch.com)
+Manticore config file:
+Backup dir: /tmp/
+%{DATETIME} [Info] Stored versions: {"backup":"%{VERSION}","manticore":"%{VERSION}","columnar":"%{VERSION}","secondary":"%{VERSION}","knn":"%{VERSION}","buddy":"%{VERSION}"}
+%{DATETIME} [Info] Current versions: {"backup":"%{VERSION}","manticore":"%{VERSION}","columnar":"%{VERSION}","secondary":"%{VERSION}","knn":"%{VERSION}","buddy":"%{VERSION}"}
+%{DATETIME} [Info] Starting to restore...
+Manticore config
+endpoint =  http://127.0.0.1:9312
+Manticore config
+endpoint =  http://127.0.0.1:9312
+%{DATETIME} [Info] Restoring config files...
+%{DATETIME} [Info]   config files - OK
+%{DATETIME} [Info] Restoring state files...
+%{DATETIME} [Info]   state files - OK
+%{DATETIME} [Info] Restoring data files...
+%{DATETIME} [Info]   tables' files - OK
+%{DATETIME} [Info] The backup '/tmp/backup-%{NUMBER}' was successfully restored.
+%{DATETIME} [Info] Elapsed time: #!/[0-9]+/!#.#!/[0-9]+/!#s
+%{DATETIME} [Info] Done
+––– input –––
+ls /tmp/manticore.conf
+––– output –––
+/tmp/manticore.conf
+––– input –––
+ls /etc/manticoresearch/manticore.conf
+––– output –––
+/etc/manticoresearch/manticore.conf

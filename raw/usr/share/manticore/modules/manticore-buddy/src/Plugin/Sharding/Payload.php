@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 
 /*
-  Copyright (c) 2023, Manticore Software LTD (https://manticoresearch.com)
+  Copyright (c) 2023-present, Manticore Software LTD (https://manticoresearch.com)
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License version 2 or any later
@@ -27,6 +27,7 @@ final class Payload extends BasePayload {
 	public string $table;
 	public string $structure;
 	public string $extra;
+	public bool $quiet;
 	/** @var array<string,int|string> */
 	public array $options;
 
@@ -57,6 +58,44 @@ final class Payload extends BasePayload {
 	 * @return static
 	 */
 	public static function fromRequest(Request $request): static {
+		return match ($request->command) {
+			'create', 'alter' => static::fromCreate($request),
+			'drop' => static::fromDrop($request),
+			'desc', 'describe', 'show' => static::fromDesc($request),
+			default => throw new QueryParseError('Failed to parse query'),
+		};
+	}
+
+	/**
+	 * @param Request $request
+	 * @return static
+	 * @throws QueryParseError
+	 */
+	protected static function fromDesc(Request $request): static {
+		$pattern = '/(?:DESC|DESCRIBE|SHOW\s+CREATE\s+TABLE)\s+(?P<table>[^:\s\()]+)/ius';
+		if (!preg_match($pattern, $request->payload, $matches)) {
+			throw QueryParseError::create('Failed to parse query');
+		}
+
+		$self = new static();
+		$self->path = $request->path;
+		$self->type = $request->command;
+		$self->cluster = '';
+		$self->table = strtolower($matches['table']);
+		$self->structure = '';
+		$self->options = [];
+		$self->quiet = false;
+		$self->extra = '';
+		$self->validate();
+		return $self;
+	}
+
+	/**
+	 * @param Request $request
+	 * @return static
+	 * @throws QueryParseError
+	 */
+	protected static function fromCreate(Request $request): static {
 		$pattern = '/(?:CREATE\s+TABLE|ALTER\s+TABLE)\s+'
 			. '(?:(?P<cluster>[^:\s]+):)?(?P<table>[^:\s\()]+)\s*'
 			. '(?:\((?P<structure>.+?)\)\s*)?'
@@ -68,27 +107,78 @@ final class Payload extends BasePayload {
 		/** @var array{table:string,cluster?:string,structure:string,extra:string} $matches */
 		$options = [];
 		if ($matches['extra']) {
-			$pattern = '/(?P<key>rf|shards)\s*=\s*(?P<value>\'?\d+\'?)/';
-			if (preg_match_all($pattern, $matches['extra'], $optionMatches, PREG_SET_ORDER)) {
-				foreach ($optionMatches as $optionMatch) {
-					$key = strtolower($optionMatch['key']);
-					$value = (int)$optionMatch['value'];
-					$options[$key] = $value;
-				}
-			}
+			$pattern = '/(?P<key>rf|shards|timeout)\s*=\s*\'(?P<value>[^\']*)\'/ius';
+			$options = static::validateOptions($pattern, $matches['extra']);
 			// Clean up extra from extracted options
 			$matches['extra'] = trim(preg_replace($pattern, '', $matches['extra']) ?? '');
+		}
+		if (isset($options['shards']) && $options['shards'] > 3000) {
+			QueryParseError::throw('Shard count cannot be greater than 3000');
 		}
 
 		$self = new static();
 		// We just need to do something, but actually its' just for PHPstan
 		$self->path = $request->path;
-		$self->type = strpos($request->payload, 'create') === 0 ? 'create' : 'alter';
+		$self->type = $request->command === 'create' ? 'create' : 'alter';
 		$self->cluster = $matches['cluster'] ?? '';
-		$self->table = $matches['table'];
+		$self->table = strtolower($matches['table']);
 		$self->structure = $matches['structure'];
 		$self->options = $options;
 		$self->extra = $matches['extra'];
+		$self->validate();
+		return $self;
+	}
+
+	/**
+	 * @param string $pattern
+	 * @param string $value
+	 * @return array<string,int|string>
+	 */
+	protected static function validateOptions(string $pattern, string $value): array {
+		$keys = [];
+		$options = [];
+		if (preg_match_all($pattern, $value, $optionMatches, PREG_SET_ORDER)) {
+			foreach ($optionMatches as $optionMatch) {
+				$key = strtolower($optionMatch['key']);
+
+				if (isset($keys[$key])) {
+					QueryParseError::throw("Duplicate parameter '{$key}' found");
+				}
+				$keys[$key] = true;
+				if (trim($optionMatch['value'], '0123456789') !== '') {
+					QueryParseError::throw("Parameter '{$key}' requires to have a numeric value");
+				}
+				if (empty($value)) {
+					QueryParseError::throw("Parameter '{$key}' requires to have a value");
+				}
+
+				$options[$key] = (int)$optionMatch['value'];
+			}
+		}
+		return $options;
+	}
+
+	/**
+	 * @param Request $request
+	 * @return static
+	 * @throws QueryParseError
+	 */
+	protected static function fromDrop(Request $request): static {
+		$pattern = '/DROP\s+TABLE\s+(?P<quiet>IF\s+EXISTS\s+)?'
+			. '(?:(?P<cluster>[^:\s]+):)?(?P<table>[^:\s\()]+)/ius';
+		if (!preg_match($pattern, $request->payload, $matches)) {
+			throw QueryParseError::create('Failed to parse query');
+		}
+
+		$self = new static();
+		$self->path = $request->path;
+		$self->type = 'drop';
+		$self->quiet = !!$matches['quiet'];
+		$self->cluster = $matches['cluster'];
+		$self->table = strtolower($matches['table']);
+		$self->structure = '';
+		$self->options = [];
+		$self->extra = '';
 		$self->validate();
 		return $self;
 	}
@@ -98,14 +188,27 @@ final class Payload extends BasePayload {
 	 * @return bool
 	 */
 	public static function hasMatch(Request $request): bool {
-		return stripos($request->error, 'syntax error')
-			&& strpos($request->error, 'P03') === 0
+		// Desc and Show distributed table first
+		if (($request->command === 'desc' || $request->command === 'describe')
+			&& strpos($request->error, 'contains system') !== false
+		) {
+			return true;
+		}
+		if ($request->command === 'show' && strpos($request->error, 'error in your query') !== false) {
+			return true;
+		}
+
+		// Create and Drop
+		return (stripos($request->error, 'contains system table')
+			|| stripos($request->error, 'require Buddy') ||
+			(stripos($request->error, 'syntax error') && stripos($request->error, 'near \':'))
+		)
 			&& (
-				stripos($request->payload, 'create table') === 0
-				)
-			&& stripos($request->payload, 'rf') !== false
-			&& stripos($request->payload, 'shards') !== false
-			&& preg_match('/(?P<key>rf|shards)\s*=\s*(?P<value>[\'"]?\d+[\'"]?)/', $request->payload);
+				(stripos($request->payload, 'create table') === 0
+					&& stripos($request->payload, 'shards') !== false
+					&& preg_match('/(?P<key>rf|shards)\s*=\s*\'(?P<value>[^\']*)\'/ius', $request->payload)
+				) || stripos($request->payload, 'drop') === 0
+			);
 	}
 
 	/**
@@ -113,9 +216,25 @@ final class Payload extends BasePayload {
 	 * @return void
 	 */
 	protected function validate(): void {
-		if (!$this->cluster && $this->options['rf'] > 1) {
+		if ($this->type === 'create' && !isset($this->options['rf'])) {
+			throw QueryParseError::create('Sharded table requires `rf=n`');
+		}
+
+		if (!$this->cluster && ($this->type === 'create' || $this->type === 'alter') && $this->options['rf'] > 1) {
 			throw QueryParseError::create('You cannot set rf greater than 1 when creating single node sharded table.');
 		}
+
+		if (isset($this->options['timeout']) && $this->options['timeout'] < 0) {
+			throw QueryParseError::create('You cannot set timeout less than 0');
+		}
+	}
+
+	/**
+	 * Get sharding timeout
+	 * @return int
+	 */
+	public function getShardingTimeout(): int {
+		return (int)($this->options['timeout'] ?? 30);
 	}
 
 	/**
@@ -125,18 +244,40 @@ final class Payload extends BasePayload {
 	 * table:array{cluster:string,name:string,structure:string,extra:string},
 	 * replicationFactor:int,
 	 * shardCount:int
-	 * }
+	 * }|array{table:array{cluster:string,name:string}}
 	 */
-	public function toShardArgs(): array {
-		return [
-			'table' => [
-				'cluster' => $this->cluster,
-				'name' => $this->table,
-				'structure' => $this->structure,
-				'extra' => $this->extra,
+	public function toHookArgs(): array {
+		return match ($this->type) {
+			'create' => [
+				'table' => [
+					'cluster' => $this->cluster,
+					'name' => $this->table,
+					'structure' => $this->structure,
+					'extra' => $this->extra,
+				],
+				'replicationFactor' => (int)($this->options['rf'] ?? 1),
+				'shardCount' => (int)($this->options['shards'] ?? 2),
 			],
-			'replicationFactor' => (int)($this->options['rf'] ?? 1),
-			'shardCount' => (int)($this->options['shards'] ?? 2),
-		];
+			'drop' => [
+				'table' => [
+					'cluster' => $this->cluster,
+					'name' => $this->table,
+				],
+			],
+			default => throw new \Exception('Unsupported sharding type'),
+		};
+	}
+
+	/**
+	 * Get handler class to process depending on the type
+	 * @return string
+	 */
+	public function getHandlerClassName(): string {
+		return match ($this->type) {
+			'create' => CreateHandler::class,
+			'drop' => DropHandler::class,
+			'desc', 'describe', 'show' => DescHandler::class,
+			default => throw new \Exception('Unsupported sharding type'),
+		};
 	}
 }

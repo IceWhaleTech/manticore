@@ -42,7 +42,7 @@ class ManticoreClient {
 				throw new \RuntimeException('Failed to find the version of the manticore searchd');
 			}
 
-			$isOld = $verNum < Searchd::MIN_VERSION;
+			$isOld = $verNum !== '0.0.0' && $verNum < Searchd::MIN_VERSION;
 			if (!$isOld) {
 				[, $verDate] = explode('@', $verSfx);
 				$isOld = $verDate < Searchd::MIN_DATE;
@@ -172,9 +172,12 @@ class ManticoreClient {
    *  array with index as a key and type as a value [ index => type ]
    */
 	public function getTables(): array {
+		/** @var array{0:array{data:array<array<string,string>>}} */
 		$result = $this->execute('SHOW TABLES');
+		// To maintain compatibility with manticore that has Index instead of Table in output
+		$key = isset($result[0]['data'][0]['Table']) ? 'Table' : 'Index';
 		$tables = array_combine(
-			array_column($result[0]['data'], 'Index'),
+			array_column($result[0]['data'], $key),
 			array_column($result[0]['data'], 'Type')
 		);
 
@@ -208,24 +211,63 @@ class ManticoreClient {
 
 	/**
 	 * @param string $version
-	 * @return array{backup:string,manticore:string,columnar:string,secondary:string,knn:string,buddy:string}
+	 * @return array{backup:string,manticore:string,columnar:string,secondary:string,embeddings:string,knn:string,buddy:string}
 	 */
 	protected static function parseVersions(string $version): array {
-		$verPattern = '(\d+\.\d+\.\d+[^\(\)]+)';
-		$matchExpr = "/^(?:Manticore\s)?{$verPattern}(?:[^\(]*\(columnar\s{$verPattern}\))?"
-			. "(?:[^\(]*\(secondary\s{$verPattern}\))?"
-			. "(?:[^\(]*\(knn\s{$verPattern}\))?"
-			. '(?:[^\(]*\(buddy\sv?(\d+\.\d+\.\d+)\))?$/ius'
-		;
-		preg_match($matchExpr, $version, $m);
-		return [
+		// Initialize result array with default values
+		$result = [
 			'backup' => ManticoreBackup::getVersion(),
-			'manticore' => trim($m[1] ?? '0.0.0'),
-			'columnar' => trim($m[2] ?? '0.0.0'),
-			'secondary' => trim($m[3] ?? '0.0.0'),
-			'knn' => trim($m[4] ?? '0.0.0'),
-			'buddy' => trim($m[5] ?? '0.0.0'),
+			'manticore' => '0.0.0',
+			'columnar' => '0.0.0',
+			'secondary' => '0.0.0',
+			'embeddings' => '0.0.0',
+			'knn' => '0.0.0',
+			'buddy' => '0.0.0',
 		];
+
+		$semverPattern = '(?:\d+\.\d+\.\d+(\s+[^\s\(\)]*)?)';
+
+		// Process version string using the new flexible approach
+		$splitVersions = explode('(', $version);
+
+		foreach ($splitVersions as $n => $versionPart) {
+			$versionPart = trim($versionPart);
+
+			// Remove trailing parenthesis if present
+			if ($versionPart && $versionPart[mb_strlen($versionPart) - 1] === ')') {
+				$versionPart = substr($versionPart, 0, -1);
+			}
+
+			// Skip empty parts
+			if (empty($versionPart)) {
+				continue;
+			}
+
+			$exploded = explode(' ', $versionPart);
+
+			// Extract the semver format using regex
+			if (!preg_match("/$semverPattern/", $versionPart, $matches)) {
+				continue;
+			}
+
+			$semver = $matches[0];
+
+			if ($n === 0) {
+				// First part is the main Manticore version
+				$result['manticore'] = $semver;
+			} else {
+				// Component name is the first word in the part
+				$componentName = strtolower($exploded[0]);
+
+				// Map component to result array if it exists
+				if (isset($result[$componentName])) {
+					$result[$componentName] = $semver;
+				}
+			}
+		}
+
+		/** @var array{backup:string,manticore:string,columnar:string,secondary:string,embeddings:string,knn:string,buddy:string} */
+		return $result;
 	}
 
 	public function flushAttributes(): void {

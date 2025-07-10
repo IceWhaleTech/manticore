@@ -29,8 +29,8 @@
                 "tools": {
                     "phpunit8": {
                         "url": "https://phar.phpunit.de/phpunit-8.phar",
-                        "only-dev": true,
-                        "replace": true
+                        "replace": true,
+                        "only-dev": true
                     }
                 }
             },
@@ -62,17 +62,17 @@
         },
         {
             "name": "manticoresoftware/telemetry",
-            "version": "0.1.21",
-            "version_normalized": "0.1.21.0",
+            "version": "0.1.23",
+            "version_normalized": "0.1.23.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/manticoresoftware/telemetry-lib.git",
-                "reference": "954890948c23612e75c40b7e29363f6d7ea28955"
+                "reference": "8e2efd649a04d449b87fcc7de1261f13dac184bd"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/manticoresoftware/telemetry-lib/zipball/954890948c23612e75c40b7e29363f6d7ea28955",
-                "reference": "954890948c23612e75c40b7e29363f6d7ea28955",
+                "url": "https://api.github.com/repos/manticoresoftware/telemetry-lib/zipball/8e2efd649a04d449b87fcc7de1261f13dac184bd",
+                "reference": "8e2efd649a04d449b87fcc7de1261f13dac184bd",
                 "shasum": ""
             },
             "require": {
@@ -85,7 +85,7 @@
                 "slevomat/coding-standard": "^8.5",
                 "squizlabs/php_codesniffer": "^3.7"
             },
-            "time": "2024-03-19T11:33:03+00:00",
+            "time": "2024-03-20T07:42:24+00:00",
             "type": "library",
             "installation-source": "dist",
             "autoload": {
@@ -111,7 +111,7 @@
             ],
             "support": {
                 "issues": "https://github.com/manticoresoftware/telemetry-lib/issues",
-                "source": "https://github.com/manticoresoftware/telemetry-lib/tree/0.1.21"
+                "source": "https://github.com/manticoresoftware/telemetry-lib/tree/0.1.23"
             },
             "install-path": "../manticoresoftware/telemetry"
         }

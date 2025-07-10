@@ -30,6 +30,12 @@ class ManticoreResponseTest extends TestCase {
 
 	protected function setUp(): void {
 		$responseBody = "[\n{\n"
+			. '"total": 1,'
+			. "\n"
+			. '"warning": "",'
+			. "\n"
+			. '"error": "",'
+			. "\n"
 			. '"columns": ['
 			. "\n{\n"
 			. '"id": {'
@@ -46,7 +52,7 @@ class ManticoreResponseTest extends TestCase {
 			. "\n"
 			. '"a": 3'
 			. "\n}\n]\n}\n]";
-		$this->response = new Response($responseBody);
+		$this->response = Response::fromBody($responseBody);
 		$this->refCls = new \ReflectionClass(Response::class);
 	}
 
@@ -63,8 +69,9 @@ class ManticoreResponseTest extends TestCase {
 		$data = [
 			['id' => 1, 'a' => 3],
 		];
+
 		$this->assertInstanceOf(Response::class, $this->response);
-		$this->assertNull($this->refCls->getProperty('error')->getValue($this->response));
+		$this->assertEquals('', $this->refCls->getProperty('error')->getValue($this->response));
 		$this->assertEquals($data, $this->refCls->getProperty('data')->getValue($this->response));
 		$this->assertEquals($columns, $this->refCls->getProperty('columns')->getValue($this->response));
 	}
@@ -73,7 +80,7 @@ class ManticoreResponseTest extends TestCase {
 		echo "\nTesting the fail on the creation of Manticore response\n";
 		$this->expectException(ManticoreSearchResponseError::class);
 		$this->expectExceptionMessage('Invalid JSON found');
-		new Response('{"some unvalid json"}');
+		Response::fromBody('{"some unvalid json"}');
 	}
 
 	public function testHasError(): void {

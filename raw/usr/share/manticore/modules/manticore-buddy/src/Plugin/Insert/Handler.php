@@ -61,14 +61,29 @@ class Handler extends BaseHandlerWithClient {
 		$taskFn = static function (Payload $payload, Client $manticoreClient): TaskResult {
 			for ($i = 0, $maxI = sizeof($payload->queries) - 1; $i <= $maxI; $i++) {
 				$query = $payload->queries[$i];
+
 				$resp = $manticoreClient->sendRequest($query, $i === 0 ? null : $payload->path);
 			}
-
 			if (!isset($resp)) {
 				throw new Exception('Empty queries to process');
 			}
 
-			return TaskResult::raw((array)json_decode($resp->getBody(), true));
+			// Postprocessing Elastic-like inserts to keep Elastic-like response format
+			if (!$payload->isElasticLikeInsert) {
+				return TaskResult::fromResponse($resp);
+			}
+			$resp->postprocess(
+				function ($body) {
+					$data = (array)simdjson_decode($body, true);
+					if (isset($data['id'])) {
+						$data['_id'] = $data['id'];
+						unset($data['id']);
+					}
+					return json_encode($data);
+				}
+			);
+
+			return TaskResult::fromResponse($resp);
 		};
 		return Task::create(
 			$taskFn, [$this->payload, $this->manticoreClient]
