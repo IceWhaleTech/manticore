@@ -1,4 +1,6 @@
 {
     "name": "manticore_icu",
+    "version": "10.1.0",
+    "description": "Manticore ICU",
     "services": []
 }

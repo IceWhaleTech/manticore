@@ -1,5 +1,8 @@
 {
     "name": "manticore",
+    "version": "10.1.0",
+    "description": "Manticore",
+    "author": "Manticore",
     "services": [
         {
             "name": "manticore"

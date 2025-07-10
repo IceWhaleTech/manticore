@@ -1,5 +1,11 @@
 {
     "name": "manticore_jieba",
-    "version": "0.0.1",
+    "version": "10.1.0",
+    "description": "Manticore Jieba",
+    "author": "Manticore",
+    "icon": "https://manticore.icu/icon.png",
+    "website": "https://manticore.icu",
+    "repository": "https://github.com/manticore-icu/manticore-icu",
+    "license": "MIT",
     "services": []
 }
